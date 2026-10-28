@@ -35,6 +35,11 @@ float4 ScenePS(SceneVertex i) : SV_Target {
     // in the current source itself; pure emissive text keeps the common blend.
     bool emissiveBar=policy.b>0.5 && policy.r>0.5 && original.g>original.r*1.2 && original.g>original.b*1.2;
     bool planeEmission=policy.b>0.5 && policy.r<0.5;
+    // A flattened full-screen HUD fade can begin before the loading-state event.
+    // Its opaque black coverage wins over artwork emission. Ordinary flight
+    // has zero global fade and uses exactly the existing artwork blend.
+    bool coveredArtwork=planeEmission && i.fade>0 && BlackFadeCoverage(original)>0;
+    planeEmission=planeEmission&&!coveredArtwork;
     bool sharpEmission=policy.b>1.5 && policy.b<2.5;
     bool borderEmission=policy.b>2.5 && policy.b<3.5;
     bool inside=HasDarkCoverage(combine)&&!emissiveBar&&!planeEmission&&!sharpEmission;
@@ -74,5 +79,7 @@ float4 ScenePS(SceneVertex i) : SV_Target {
     // Preserve the stored premultiplied sharp copy and coverage; live alpha
     // sufficiency remains a single portrait test, never an opaque PNG inference.
     color.rgb=lerp(color.rgb,original.rgb+scene.rgb*(1-original.a),policy.g);
-    return float4(saturate(color.rgb),scene.a);
+    // UNORM targets clamp automatically. Float eye surfaces retain scene HDR
+    // headroom instead of clipping the entire eye to SDR during HUD blending.
+    return float4(max(color.rgb,0),scene.a);
 }

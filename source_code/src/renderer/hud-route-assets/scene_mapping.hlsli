@@ -19,6 +19,10 @@ float3 Rotate(float4 q, float3 p) {
     return p + q.w*t + cross(q.xyz,t);
 }
 float3 CylinderPoint(float2 uv) {
+    if(SceneSizeAspect.w>0.5){
+        float3 p=float3((uv.x-0.5)*CylinderPositionRadius.w,(0.5-uv.y)*EyePositionAngle.w,0);
+        return Rotate(CylinderQuaternion,p)+CylinderPositionRadius.xyz;
+    }
     float radius=CylinderPositionRadius.w;
     float angle=EyePositionAngle.w;
     float theta=(uv.x-0.5)*angle;
@@ -45,6 +49,16 @@ float4 InverseMap(float4 position:SV_Position):SV_Target {
     float4 qi=float4(-CylinderQuaternion.xyz,CylinderQuaternion.w);
     float3 origin=Rotate(qi,EyePositionAngle.xyz-CylinderPositionRadius.xyz);
     float3 direction=Rotate(qi,Rotate(EyeQuaternion,eyeRay));
+    if(SceneSizeAspect.w>0.5){
+        // A flat OpenXR quad lies in its own XY plane. Intersect this eye's
+        // current ray with that plane; do not approximate it as a huge cylinder.
+        if(origin.z<=0||direction.z>=-1e-8)return 0;
+        float t=-origin.z/direction.z;
+        float3 p=origin+t*direction;
+        float2 uv=float2(0.5+p.x/CylinderPositionRadius.w,0.5-p.y/EyePositionAngle.w);
+        if(all(uv>=0)&&all(uv<=1))return float4(uv,1,1);
+        return 0;
+    }
     float radius=CylinderPositionRadius.w;
     float a=dot(direction.xz,direction.xz);
     float b=2*dot(origin.xz,direction.xz);

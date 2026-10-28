@@ -1,19 +1,24 @@
-AC8 VR installable profile files (relative to the per-game UEVR folder)
+Fresh-install runtime files, relative to AceCombat8. Core is required. The seven other Lua modules are optional. VERSION is source/release metadata, not a required runtime file.
 
+README.txt
 config.txt
 cvars_data.txt
-data/AC8_VR-PerPlaneCameraOffsets.lua
-data/ac8_bomb_landing_controls.json
-data/ac8_escort_draw_scale_enabled.flag
-data/ac8_hangar_coverage_controls.json
-data/ac8_offscreen_group_controls.json
-data/ac8_pause_controls.json
-data/ac8_target_arrow_shift_controls.json
-data/ac8_tutorial_fill_controls.json
-data/ac8_wingman_status_controls.json
-data/ac8_workshop_target_controls.json
-data/ac8_workshop_v2_controls.json
-data/ac8_world_target_controls.json
+data/AC8_VR-AircraftPresets.json
+data/AC8_VR-ArrowLiveControls.json
+data/AC8_VR-BombLandingControls.json
+data/AC8_VR-EscortDrawScaleEnabled.flag
+data/AC8_VR-HUDDefaults.json
+data/AC8_VR-HangarCoverageControls.json
+data/AC8_VR-OffscreenGroupControls.json
+data/AC8_VR-PauseControls.json
+data/AC8_VR-TargetArrowShiftControls.json
+data/AC8_VR-TargetSettings.json
+data/AC8_VR-WingmanStatusControls.json
+data/AC8_VR-WorkshopEffectControls.json
+data/AC8_VR-WorldTargetControls.json
+plugins/AC8_VR-Features.bin
+plugins/AC8_VR-OpenXRBridge.dll
+plugins/AC8_VR-OpenXRLayer/AC8_VR-Glow.json
 plugins/AC8_VR-Runtime.dll
 plugins/ac8-hud-assets/event-3347-PS-root-parameters.bin
 plugins/ac8-hud-assets/event-3347-VS-constants.bin
@@ -59,13 +64,11 @@ plugins/ac8-hud-assets/pso-4280-PS.dxbc
 plugins/ac8-hud-assets/pso-4280-VS.dxbc
 plugins/ac8-hud-assets/pso-4281-PS.dxbc
 plugins/ac8-hud-assets/pso-4281-VS.dxbc
-scripts/AC8_VR-CinematicPresentation.lua
+scripts/AC8_VR-AircraftPresets.lua
+scripts/AC8_VR-Cinematics_Hangar_Presentation.lua
 scripts/AC8_VR-Core.lua
-scripts/AC8_VR-HUDLayout.lua
-scripts/AC8_VR-InheritedHUD.lua
-scripts/AC8_VR-LoadingTransitions.lua
+scripts/AC8_VR-HUD_Glow.lua
+scripts/AC8_VR-HUD_Layout.lua
+scripts/AC8_VR-Loading.lua
 scripts/AC8_VR-PlaneCamera.lua
-scripts/AC8_VR-StartupMovies.lua
-scripts/AC8_VR-UIRendering.lua
-scripts/AC8_VR-WorldTargets.lua
-VERSION
+scripts/AC8_VR-Targets.lua

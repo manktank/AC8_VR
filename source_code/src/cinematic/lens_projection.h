@@ -1,7 +1,3 @@
-// Fit an authored camera lens into the requested presentation window. All
-// inputs are validated before producing scale factors; the caller decides when
-// cinematic lens adjustment is enabled and owns synchronization.
-
 #pragma once
 #include <cmath>
 #include <algorithm>
@@ -28,5 +24,24 @@ inline std::mutex mutex;
 inline Lens lens{};
 inline View view{};
 inline bool requested=false;
+inline bool full_view=false;
+inline bool expanded=false;
 inline bool current(Fit& out){std::lock_guard<std::mutex> guard(mutex);return requested&&fit(lens,view,out);}
+inline bool expanded_fit(Fit& out){std::lock_guard<std::mutex> guard(mutex);return requested&&expanded&&fit(lens,view,out);}
+template<typename T> bool apply_expanded(T (&matrix)[4][4],const Fit& fit){
+    // A single focal multiplier preserves each runtime eye's native asymmetry
+    // and horizontal/vertical ratio. Never substitute the movie aspect here.
+    if(!std::isfinite(fit.scale_x+fit.scale_y)||fit.scale_x<=0||std::abs(fit.scale_x-fit.scale_y)>1e-9||
+       !std::isfinite(matrix[0][0]+matrix[1][1])||matrix[0][0]<=0||matrix[1][1]<=0)return false;
+    matrix[0][0]=static_cast<T>(matrix[0][0]*fit.scale_x);matrix[1][1]=static_cast<T>(matrix[1][1]*fit.scale_x);return true;
+}
+template<typename T> bool apply_full_view(T (&matrix)[4][4]){
+    std::lock_guard<std::mutex> guard(mutex);
+    if(!requested||!full_view||!std::isfinite(lens.fov+lens.aspect)||lens.fov<.25||lens.fov>170||lens.aspect<.5||lens.aspect>5||
+       !std::isfinite(matrix[0][0]+matrix[1][1])||matrix[0][0]<=0||matrix[1][1]<=0)return false;
+    const double x=1/std::tan(lens.fov*3.14159265358979323846/360);
+    // Full eye image: use the director's horizontal FOV/aspect directly. Keep
+    // off-axis eye centers, depth terms and every other matrix entry unchanged.
+    matrix[0][0]=static_cast<T>(x);matrix[1][1]=static_cast<T>(x*lens.aspect);return true;
+}
 }

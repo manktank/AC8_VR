@@ -1,13 +1,18 @@
--- Own cinematic/hangar UI and camera transitions, including interrupted-session recovery.
--- Save settings before acquiring ownership and restore them before releasing it.
--- PlaneCamera and HUD defaults defer while this module owns those settings.
--- See source_code/MAINTAINERS.md for ownership and update rules.
--- AC8 VR: register sections; Core starts them in explicit dependency order.
--- Filenames need no numeric prefixes. Keep the complete public script set together.
-local registry = rawget(_G, 'AC8VRModules')
-if not registry then
- registry = {sections={}, state='waiting', completed={}}
- rawset(_G, 'AC8VRModules', registry)
+-- AC8 modular release.
+-- AC8 modular local trial. Core is required; sibling features are optional.
+-- Remove a feature file with the game closed; its native work is absent next launch.
+local registry=rawget(_G,'AC8VRModules')
+if not registry then registry={sections={},state='waiting',completed={}};rawset(_G,'AC8VRModules',registry)end
+
+-- This feature's admission policy. Core supplies only demanded current-owner facts.
+local function movie(R)
+ if R.settingsBusy('presentation','gameplay')then return true end
+ local c=R.context;local hn=c.hudName or'';local tn=R.viewTargetName()
+ return hn:match('^BP_LiveCinemaHUD_C ')~=nil or hn:match('^BP_LiveHangarHUD_C ')~=nil or
+  tn:match('^BP_MGC_CineCamera_C ')~=nil or tn:match('^BP_IGC_CameraPawn_')~=nil
+end
+local function gameplay(R)
+ return not R.settingsBusy('presentation','gameplay')and R.context.flight==true and R.viewTargetName():match('^BP_PlayerPlane_')~=nil and R.matchState()~='WaitingToStart'
 end
 assert(not registry.sections['cutscene_guard'], 'Duplicate AC8 VR section: cutscene_guard')
 registry.sections['cutscene_guard'] = function(R)
@@ -58,7 +63,7 @@ local S = {
 
 local TRUE_S, FALSE_S = "true", "false"
 
-
+local last_log_t = -999
 
 
 
@@ -255,10 +260,10 @@ end
 
 local ok, err = pcall(setup)
 if not ok then
-    print(LOG .. "AC8 layout" .. tostring(err))
+    
 end
 
-end)(AC8Runtime.host('utility','ac8_cutscene_guard.lua'),AC8Runtime.json,AC8Runtime.log)
+end)(AC8Runtime.host('utility','AC8_VR-CutsceneGuardV1.lua'),AC8Runtime.json,AC8Runtime.log)
 end
 
 end
@@ -267,7 +272,7 @@ registry.sections['cinematic'] = function(R)
 -- Cinematic and hangar presentation, camera heuristics and transition coverage.
 
 do
--- cinematic intent.
+-- ac8 cinematic intent v1
 (function(uevr,json,print)
 
 local previous=rawget(_G,'AC8_CinematicIntent')
@@ -287,9 +292,9 @@ local screen='VR_2DScreenMode'
 
 
 local cameraKeys={'VR_CameraForwardOffset','VR_CameraRightOffset','VR_CameraUpOffset'}
-local uiKeys={'UI_OverlayType','UI_Distance','UI_Size','UI_FollowView','UI_Y_Offset','UI_X_Offset','UI_Cylinder_Angle'}
+local uiKeys={'UI_OverlayType','UI_Distance','UI_FollowView','UI_Y_Offset','UI_X_Offset','UI_Cylinder_Angle'}
 
-local uiDefaults={UI_OverlayType='0',UI_Distance='0.985',UI_Size='1',UI_FollowView='false',UI_Y_Offset='0',UI_X_Offset='0'}
+local uiDefaults={UI_OverlayType='0',UI_Distance='0.985',UI_FollowView='false',UI_Y_Offset='0',UI_X_Offset='0'}
 local allKeys={}
 for _,k in ipairs(uiKeys) do allKeys[#allKeys+1]=k end
 for _,k in ipairs(cameraKeys) do allKeys[#allKeys+1]=k end
@@ -299,17 +304,15 @@ local function setUI(k,v)
     return ok and (observed==tostring(v) or (tonumber(observed) and tonumber(observed)==tonumber(v)))
 end
 local function journal(values)
-    return pcall(function() json.dump_file('ac8_cinematic_ui_restore.json',{version=1,values=values},2) end)
+    return pcall(function() json.dump_file('AC8_VR-CinematicUIRestore.json',{version=1,values=values},2) end)
 end
 
-local recovered,backup=pcall(function() return json.load_file('ac8_cinematic_ui_restore.json') end)
+local recovered,backup=pcall(function() return json.load_file('AC8_VR-CinematicUIRestore.json') end)
 if recovered and type(backup)=='table' and backup.version==1 and type(backup.values)=='table' then
     local valid=true
     for _,k in ipairs(uiKeys) do if k~='UI_Y_Offset' and k~='UI_X_Offset' and k~='UI_Cylinder_Angle' and type(backup.values[k])~='string' then valid=false end end
     if valid then for _,k in ipairs(allKeys) do if type(backup.values[k])=='string' then S.saved[k]=backup.values[k] end end;S.recoveringUI=true end
 end
--- Recovery can span ticks. Keep saved values/journal until every owned value
--- is restored; other camera/layout services use this as an ownership barrier.
 local function restoreUI()
     if next(S.saved)==nil then return true end
     local all=true
@@ -333,34 +336,11 @@ local function classify(row)
     if hud:match('^BP_LiveMenuHUD_C ') then return 'menu' end
     return 'unknown'
 end
+-- First-owner reflection is infrequent but can be expensive at cinematic entry.
+local entryMetrics={}
+
 local inspectedOwners={}
-local function subtitleOwner(hud)
-    local name=full(hud)
-    if not name or inspectedOwners[name] or not (name:match('^BP_LiveCinemaHUD_C ') or name:match('^LiveMainHUDParent4K_C ')) then return end
-    inspectedOwners[name]=true
-    local names,refs={},{}
-    local c=value(hud,'get_class')
-    for depth=1,5 do
-        if not c then break end
-        c=value(c,'as_class') or c
-        local p=value(c,'get_child_properties')
-        for i=1,96 do
-            if not p then break end
-            local n=value(value(p,'get_fname'),'to_string')
-            if n and #names<128 then
-                names[#names+1]=n
-                local lower=n:lower()
-                if lower:find('subtitle',1,true) or lower:find('caption',1,true) or lower:find('widget',1,true) then
-                    local reference=full(prop(hud,n))
-                    if reference then refs[n]=reference end
-                end
-            end
-            p=value(p,'get_next')
-        end
-        c=value(c,'get_super_struct')
-    end
-    
-end
+
 local missionCache={}
 local function missionMatchState(pc)
     local name=full(pc)
@@ -368,6 +348,7 @@ local function missionMatchState(pc)
     if not level then return nil end
     if missionCache.level==level and S.elapsed<(missionCache.untilTime or 0) then return missionCache.value end
     missionCache={level=level,untilTime=S.elapsed+0.5}
+    local current=R.matchState();if current~=nil then missionCache.value=current;return current end
     local cls=value(uevr.api,'find_uobject','Class /Script/Live.LiveGameState')
     local states=value(cls,'get_objects_matching',false)
     if type(states)~='table' then return nil end
@@ -386,7 +367,7 @@ local function camera()
     if not pc then pc=prop(value(uevr.api,'get_player_pawn'),'Controller') end
     local pm=prop(pc,'PlayerCameraManager')
     local hud=value(pc,'GetHUD')
-    subtitleOwner(hud)
+    
     local vt=value(pc,'GetViewTarget') or value(pm,'GetViewTarget')
     local component=prop(vt,'CameraComponent') or prop(vt,'CineCameraComponent')
     if not component then
@@ -400,14 +381,14 @@ local function camera()
         focalLength=prop(component,'CurrentFocalLength'),screenMode=mv(screen),missionMatchState=missionMatchState(pc)}
 end
 local function mask(on)
-    local data=on and ('on|'..S.saved.UI_Size..'|'..S.saved.UI_Distance) or 'off'
+    local data=on and ('on|'..mv('UI_Size')..'|'..S.saved.UI_Distance) or 'off'
     return pcall(function() uevr.api:dispatch_custom_event('AC8_CinematicMask',data) end)
 end
 local function shotOverrides(on,mode)
     if S.shotOverridesActive==on then return end
     if not on then pcall(function() uevr.api:dispatch_custom_event('AC8_CinematicLensMode','off') end) end
     local ok=pcall(function() uevr.api:dispatch_custom_event('AC8_CinematicCamera',on and 'on' or 'off') end)
-    if not ok then return end
+    if not ok then ;return end
     S.shotOverridesActive=on;S.cameraLocked=on
     if on and S.lensRequested and S.nativeProjectionReady then
         pcall(function() uevr.api:dispatch_custom_event('AC8_CinematicLensMode','on') end)
@@ -419,22 +400,23 @@ local function exit(reason)
     pcall(function() uevr.api:dispatch_custom_event('AC8_CinematicLensMode','off') end)
     pcall(function() uevr.api:dispatch_custom_event('AC8_CinematicCamera','off') end)
     mask(false);S.maskActive=false;S.cameraLocked=false;S.shotOverridesActive=false;S.automaticSession=false
-    if reason=='manual' or reason=='F7' then S.suppressCurrentChain=true end
+    if reason=='manual' then S.suppressCurrentChain=true end
     local restored=restoreUI()
-
+    ;
 end
 local function enter(automatic)
+    if AC8Runtime.flightUISize and not AC8Runtime.flightUISize.restore()then return end
     if S.maskActive then return end
-    if not S.nativeMaskReady then ;return end
-    if next(S.saved)~=nil and not restoreUI() then return end
-    if not S.nativeCameraReady or mv('VR_RenderingMethod')~='0' then return end
+    if not S.nativeMaskReady then ;;return end
+    if next(S.saved)~=nil and not restoreUI() then ;return end
+    if not S.nativeCameraReady or mv('VR_RenderingMethod')~='0' then ;return end
     local saved={}
     for _,k in ipairs(allKeys) do
         saved[k]=mv(k)
-        if not saved[k] or saved[k]=='' then return end
+        if not saved[k] or saved[k]=='' then ;return end
     end
-    if not tonumber(saved.UI_Size) or not tonumber(saved.UI_Distance) then return end
-    if not journal(saved) then return end
+    if not tonumber(mv('UI_Size')) or not tonumber(saved.UI_Distance) then ;return end
+    if not journal(saved) then ;return end
     S.saved=saved
     for _,k in ipairs(uiKeys) do
         local v=uiDefaults[k] or saved[k] 
@@ -454,7 +436,7 @@ local function enter(automatic)
 end
 
 S.hangarSaved={}
-local hk,hj=pcall(function()return json.load_file('ac8_hangar_restore_v48.json')end)
+local hk,hj=pcall(function()return json.load_file('AC8_VR-HangarRestoreV48.json')end)
 if hk and type(hj)=='table' and type(hj.values)=='table' then
     for _,k in ipairs(cameraKeys)do if type(hj.values[k])=='string' then S.hangarSaved[k]=hj.values[k]end end
 end
@@ -462,16 +444,17 @@ local function recoverOldHangar()
     if next(S.hangarSaved)==nil then return true end
     local restored=true
     for _,k in ipairs(cameraKeys)do if S.hangarSaved[k] and not setUI(k,S.hangarSaved[k])then restored=false end end
-    if restored and pcall(function()json.dump_file('ac8_hangar_restore_v48.json',{values={}},2)end)then S.hangarSaved={} else restored=false end
+    if restored and pcall(function()json.dump_file('AC8_VR-HangarRestoreV48.json',{values={}},2)end)then S.hangarSaved={} else restored=false end
     return restored
 end
 local function hangar(on)
     if on and not S.hangarActive then
+        if AC8Runtime.flightUISize and not AC8Runtime.flightUISize.restore()then return end
         if not recoverOldHangar()then return end
         if S.maskActive then exit('enter-hangar')end
         if not S.nativeCameraReady or not S.nativeMaskReady or mv('VR_RenderingMethod')~='0'then return end
         local saved={};for _,k in ipairs(cameraKeys)do saved[k]=mv(k);if not saved[k]then return end end
-        if not pcall(function()json.dump_file('ac8_hangar_restore_v48.json',{values=saved},2)end)then return end
+        if not pcall(function()json.dump_file('AC8_VR-HangarRestoreV48.json',{values=saved},2)end)then return end
         S.hangarSaved=saved
         local all=true;for _,k in ipairs(cameraKeys)do if not setUI(k,'0')then all=false end end
         if not all then recoverOldHangar();return end
@@ -493,8 +476,6 @@ local function hangar(on)
         
     elseif not on and next(S.hangarSaved)~=nil then recoverOldHangar()end
 end
-local togglePending=false
-
 local function authoredPose()
     local pc=value(uevr.api,'get_player_controller',0)
     local target=value(pc,'GetViewTarget')
@@ -504,7 +485,14 @@ local function authoredPose()
         component=cls and value(target,'GetComponentByClass',cls)
     end
     local name=full(component) or ''
-    if not (name:match('^LiveCineCameraComponent ') or name:match('^LiveCinematicsCineCameraComponent ')) then
+    local verified=name:match('^LiveCineCameraComponent ')or name:match('^LiveCinematicsCineCameraComponent ')
+    local nearData='off'
+    if S.hangarActive and verified and prop(component,'bOverride_CustomNearClippingPlane')==true then
+        local near=prop(component,'CustomNearClippingPlane')
+        if type(near)=='number'and near==near and near>0 and near<=1e7 then nearData=string.format('%.17g',near)end
+    end
+    pcall(function()uevr.api:dispatch_custom_event('AC8_CinematicNearClip',nearData)end)
+    if not verified then
         S.authoredPoseState='camera-component-not-verified';return
     end
     local location=value(component,'K2_GetComponentLocation')
@@ -517,8 +505,6 @@ local function authoredPose()
     S.authoredPoseState=sent and 'component-pose-sent' or 'component-pose-send-failed';S.authoredPoseComponent=name
     if S.hangarActive then S.hangarAuthoredPose=values end
 end
-uevr.sdk.callbacks.on_lua_event(function(name,data)
-end)
 S.lensCallbackRegistered=pcall(function()
     uevr.sdk.callbacks.on_early_calculate_stereo_view_offset(function()
         if not S.shotOverridesActive or not (S.maskActive or S.hangarActive) then return end
@@ -542,22 +528,11 @@ local registered=pcall(function()
         if name=='AC8_CinematicCamera_Ready' then S.nativeCameraReady=true end
         if name=='AC8_CinematicMask_Ready' and not S.nativeMaskReady then S.nativeMaskReady=true; end
         if name=='AC8_CinematicMask_Failed' then S.nativeMaskReady=false;exit('native-mask-failed') end
-        if name=='AC8_CinematicIntent_F7' then
-            togglePending=true
-            
-        end
     end)
 end)
-S.hotkeyCallbackRegistered=registered
-local nextCameraCheck=0
+S.nativeCallbackRegistered=registered
+local nextProbe=0
 local terminalMode,terminalSince=nil,nil
-local function command()
-    local ok,row=pcall(function() return json.load_file('ac8_cinematic_intent_control.json') end)
-    if ok and type(row)=='table' then return row end
-end
-local initialCommand=command()
-local lastCommand=initialCommand and initialCommand.revision
-local nextControl=0
 uevr.sdk.callbacks.on_pre_engine_tick(function(engine,delta)
     if not S.maskActive and next(S.saved)~=nil and S.elapsed>=(S.nextRestoreAttempt or 0) then
         restoreUI();S.nextRestoreAttempt=S.elapsed+2
@@ -571,22 +546,7 @@ uevr.sdk.callbacks.on_pre_engine_tick(function(engine,delta)
         for _,k in ipairs(cameraKeys)do if tonumber(mv(k))~=0 and not setUI(k,'0')then all=false end end
         S.cameraOffsetsHeldZero=all
     else S.cameraOffsetsHeldZero=false end
-    if S.elapsed>=nextControl then
-        nextControl=S.elapsed+0.25
-        local request=command()
-        if request and type(request.revision)=='string' and request.revision~=lastCommand then
-            lastCommand=request.revision
-            if request.action=='toggle' then togglePending=true end
-            
-            S.controlRevision=lastCommand
-        end
-    end
-    if togglePending then
-        togglePending=false
-        if S.maskActive then exit('F7') else enter() end
-    end
-    if S.maskActive and not S.automaticSession and S.elapsed-S.startedAt>=180 then exit('manual-timeout') end
-    if S.elapsed>=nextCameraCheck then
+    if S.elapsed>=nextProbe then
         local ok,row=pcall(camera)
         if ok then
             S.camera=row
@@ -600,7 +560,6 @@ uevr.sdk.callbacks.on_pre_engine_tick(function(engine,delta)
             if mode=='gameplay' or mode=='menu' then
                 if mode~=terminalMode then
                     terminalMode=mode;terminalSince=S.elapsed
-                    if S.maskActive then  end
                 end
 
                 local wait=mode=='gameplay' and (row.missionMatchState=='InProgress' and 0.1 or S.gameplayExitHoldSeconds) or 1.5
@@ -609,30 +568,29 @@ uevr.sdk.callbacks.on_pre_engine_tick(function(engine,delta)
                     if S.maskActive then exit('auto-return-'..mode) end
                 end
             else
-                if terminalMode and S.maskActive then
-                    
-                end
                 terminalMode=nil;terminalSince=nil
                 if mode=='cinematic' and S.automaticDetection and not S.suppressCurrentChain and not S.maskActive then enter(true) end
                 if mode=='cinematic' and S.maskActive and S.automaticDetection then S.automaticSession=true end
             end
-            
+
         end
-        nextCameraCheck=S.elapsed+0.1
+        nextProbe=S.elapsed+0.1
     end
 end)
 
-end)(AC8Runtime.host('presentation','ac8_cinematic_intent.lua'),AC8Runtime.json,AC8Runtime.log)
+;
+
+end)(AC8Runtime.host('presentation','AC8_VR-CinematicIntentV1.lua'),AC8Runtime.json,AC8Runtime.log)
 end
 
 do
--- hangar coverage.
+-- ac8 hangar coverage v56
 (function(uevr,json,print)
 
 local last=nil;local ticks=0
 uevr.sdk.callbacks.on_pre_engine_tick(function()
- ticks=ticks+1;if ticks%30~=1 then return end
- local x,y=1.25,1.25;local ok,v=pcall(function()return json.load_file('ac8_hangar_coverage_controls.json')end)
+ ticks=ticks+1;if last~=nil then return end -- Reload coverage on script/game restart.
+ local x,y=1.25,1.25;local ok,v=pcall(function()return json.load_file('AC8_VR-HangarCoverageControls.json')end)
  if ok and type(v)=='table' then
   if type(v.horizontal)=='number' and v.horizontal>=1 and v.horizontal<=3 then x=v.horizontal end
   if type(v.vertical)=='number' and v.vertical>=1 and v.vertical<=2 then y=v.vertical end
@@ -641,10 +599,30 @@ uevr.sdk.callbacks.on_pre_engine_tick(function()
  if packet~=last then uevr.api:dispatch_custom_event('AC8_HangarCoverage',packet);last=packet end
 end)
 
-end)(AC8Runtime.host('presentation','ac8_hangar_coverage.lua'),AC8Runtime.json,AC8Runtime.log)
+end)(AC8Runtime.host('presentation','AC8_VR-HangarCoverageV56.lua'),AC8Runtime.json,AC8Runtime.log)
 end
 
 
 end
 
-if registry.start then registry.start() end
+
+assert(not registry.sections.cinematic_ownership,'Duplicate cinematic ownership')
+registry.sections.cinematic_ownership=function(R)
+ local function publish()
+  local ci=rawget(_G,'AC8_CinematicIntent')or{}
+  local active=ci.maskActive or ci.hangarActive or ci.cameraLocked or ci.shotOverridesActive or ci.guardForced or ci.recoveringUI or
+   (ci.saved and next(ci.saved)~=nil)or(ci.hangarSaved and next(ci.hangarSaved)~=nil)
+  R.setOwnership('cinematics','camera',active and true or false);R.setOwnership('cinematics','ui',active and true or false)
+  local displayed=ci.maskActive or ci.hangarActive or ci.detectedMode=='cinematic'or ci.detectedMode=='hangar'
+  R.setOwnership('cinematics','presentation',displayed and true or false)
+ end
+ publish()
+ local host=R.host('presentation','cinematic settings ownership')
+ host.sdk.callbacks.on_pre_engine_tick(publish)
+ host.sdk.callbacks.on_post_engine_tick(publish)
+ host.sdk.callbacks.on_script_reset(function()R.setOwnership('cinematics','camera',false);R.setOwnership('cinematics','ui',false);R.setOwnership('cinematics','presentation',false)end)
+end
+
+if registry.start then registry.start()end
+
+

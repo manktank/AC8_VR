@@ -1,10 +1,21 @@
-// Compute the per-eye crop for the authored cinematic window. Locked camera
-// axes control the crop, while the current eye FOV limits its visible extent.
-// Invalid geometry leaves the caller free to retain the original submission.
-
 #pragma once
 #include "mask_geometry.h"
 namespace cinema_mask {
+// Reuse the movie screen's fixed pose for the existing flat HUD/subtitle layer.
+// This changes compositor metadata only: the texture, flags and eye selection
+// stay intact. Hangar and unknown/non-UI layers are excluded by the caller.
+inline bool anchor_ui_quad(const xr_read::Layer* layer,const Window& screen,unsigned width,unsigned height,xr_read::Quad& output){
+    if(!layer||layer->type!=xr_read::quad||!screen.space||layer->space!=screen.space||!width||!height)return false;
+    const auto& ui=*reinterpret_cast<const xr_read::Quad*>(layer);
+    if(ui.subImage.imageRect.extent.width!=static_cast<int>(width)||ui.subImage.imageRect.extent.height!=static_cast<int>(height)||
+       !ui.subImage.swapchain||!std::isfinite(screen.width+screen.height)||screen.width<=0||screen.height<=0)return false;
+    const auto& p=screen.pose;
+    if(!std::isfinite(p.orientation.x+p.orientation.y+p.orientation.z+p.orientation.w+p.position.x+p.position.y+p.position.z))return false;
+    const float norm=p.orientation.x*p.orientation.x+p.orientation.y*p.orientation.y+p.orientation.z*p.orientation.z+p.orientation.w*p.orientation.w;
+    if(std::abs(norm-1)>0.01f)return false;
+    output=ui;output.pose=screen.pose;output.width=screen.width;output.height=screen.height;
+    return true;
+}
 struct MovieCrop {float left,top,right,bottom;};
 // Locked cameras share authored axes. Tracked XR poses must not steer their crop.
 inline bool movie_crops(const Window& window,float distance,const xr_read::ProjectionView* images,std::array<MovieCrop,2>& crops){

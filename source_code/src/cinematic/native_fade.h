@@ -1,7 +1,3 @@
-// Read opacity from the verified native fade widget selected by Lua. The
-// source address is a short-lived runtime reference, never a file identifier.
-// Build, vtable and bounds checks prevent interpreting unrelated widget memory.
-
 #pragma once
 #include <atomic>
 #include <array>

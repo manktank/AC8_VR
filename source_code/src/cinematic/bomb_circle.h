@@ -1,7 +1,3 @@
-// Correct the landing circle only inside the verified bomb draw. The cached
-// view/lens matrices otherwise disagree with the trajectory projection in VR.
-// Every temporary matrix change must be restored before returning to the game.
-
 #pragma once
 #include <algorithm>
 // The circle's cached camera vectors affect its 3D ellipse construction; a
@@ -28,7 +24,7 @@ inline bool makeCamera(Vec p,Rotation r,Camera& c){
  c={{-cr*sp*cy-sr*sy,cy*sr-cr*sp*sy,cr*cp},{sr*sp*cy-cr*sy,sr*sp*sy+cr*cy,-sr*cp},{cp*cy,cp*sy,sp},p};return valid(c);
 }
 inline thread_local Object activeCanvas=nullptr;
-// The cached view is the post-head left eye and
+// V68: V67 traces proved the cached view is the post-head left eye and
 // cached lens is 108deg, while trajectory projection uses the native cache
 // basis and game FOV (77.819deg in that capture). Repair these actual matrices
 // only during the native circle; retain native conic geometry and rendering.
@@ -36,7 +32,7 @@ struct Matrices {std::array<double,16> view{},lens{};};
 #ifdef AC8_BOMB_PROJECTION_FIXTURE
 using Observe=void(*)(Object,const Vec*,const Vec*,float,int,bool);
 inline Observe observer=nullptr;
-inline std::atomic<uint64_t> matrixWrites=0,matrixRejected=0;
+
 #endif
 inline bool finite(const std::array<double,16>& m){for(double v:m)if(!std::isfinite(v)||std::abs(v)>1e12)return false;return true;}
 inline double dot(Vec a,Vec b){return a.x*b.x+a.y*b.y+a.z*b.z;}
@@ -65,14 +61,14 @@ inline void scopedMatrices(Object canvas,const Vec* center,const Vec* normal,flo
   !bomb_projection::read(bytes+cacheOffset,native)||!bomb_projection::read(bytes+0x2d0,saved.view)||!bomb_projection::read(bytes+0x350,saved.lens)||
   !buildMatrices(native,saved,bomb_projection::scope.active?bomb_projection::currentFov():fov,aspect,desired)){
   #ifdef AC8_BOMB_PROJECTION_FIXTURE
- ++matrixRejected;
+ static_cast<void>(0);
 #endif
  invoke();return;
  }
  struct Restore{unsigned char* bytes;Matrices saved;~Restore(){std::memcpy(bytes+0x2d0,saved.view.data(),128);std::memcpy(bytes+0x350,saved.lens.data(),128);}}restore{bytes,saved};
  std::memcpy(bytes+0x2d0,desired.view.data(),128);std::memcpy(bytes+0x350,desired.lens.data(),128);
 #ifdef AC8_BOMB_PROJECTION_FIXTURE
- ++matrixWrites;
+ static_cast<void>(0);
 #endif
  invoke();
 }

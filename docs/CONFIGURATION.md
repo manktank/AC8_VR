@@ -1,57 +1,34 @@
-# Configuration and file ownership
+# Settings and optional modules
 
-## DLL and Lua files
+Core is required. The other seven files are independently optional: removing one with the game closed disables its work next launch. General HUD controls work without AircraftPresets; aircraft camera/size controls work without HUD Layout. HUD-preset controls naturally apply to the HUD feature when both are selected.
 
-| File | Responsibility |
+| Script | Responsibility |
 |---|---|
-| `plugins/AC8_VR-Runtime.dll` | Native rendering, OpenXR presentation, validated draw hooks, pause/HUD duplicate-tick guards and target geometry corrections. |
-| `scripts/AC8_VR-Core.lua` | Startup order, callback dispatch, current HUD context, lifetime checks and shared configuration access. |
-| `scripts/AC8_VR-InheritedHUD.lua` | Community-derived cockpit calibration, instrument/radar/ladder controls and flight camera-shake suppression. |
-| `scripts/AC8_VR-CinematicPresentation.lua` | Automatic cinematic/hangar detection, UI/camera ownership, F7 override and restoration. |
-| `scripts/AC8_VR-LoadingTransitions.lua` | Loading-screen ownership, black cover, game-state lookup and native fade source. |
-| `scripts/AC8_VR-WorldTargets.lua` | Labels, persistent box sizing, introduction animation preservation, assignment pins and scoped material saturation. |
-| `scripts/AC8_VR-UIRendering.lua` | Glow lifecycle, widget policy rectangles, tutorial backgrounds and pause-menu attachment. |
-| `scripts/AC8_VR-PlaneCamera.lua` | Aircraft/cockpit detection and absolute UEVR camera offsets. |
-| `scripts/AC8_VR-HUDLayout.lua` | Final layout, radar/wingman relation, loading indicator, bomb attachment and one-time presentation defaults. |
-| `scripts/AC8_VR-StartupMovies.lua` | Allowlisted startup notice timings and movie seeks. |
-| `data/AC8_VR-PerPlaneCameraOffsets.lua` | Editable camera values and commented aircraft catalog. Keep this data file in `data`. |
+| `AC8_VR-Core.lua` | Required shared services, pause/retry navigation, native tutorial card/blur policy and removed-feature recovery. |
+| `AC8_VR-HUD_Layout.lua` | General HUD layout/group controls, linked ladder/FPM presentation, shared/global HUD defaults and first-launch UI setup. |
+| `AC8_VR-AircraftPresets.lua` | Per-aircraft HUD, camera, UI Size and cockpit-size preferences; save/reset and master-enable controls. |
+| `AC8_VR-HUD_Glow.lua` | Gameplay admission and widget policy for native per-eye glow. |
+| `AC8_VR-Targets.lua` | World-target presentation, labels, material adjustments and indicator layout. |
+| `AC8_VR-PlaneCamera.lua` | General camera-animation stabilization, independent of per-plane storage. |
+| `AC8_VR-Loading.lua` | Mission-loading cover and transition handling. |
+| `AC8_VR-Cinematics_Hangar_Presentation.lua` | Movie/hangar camera and UI ownership, framing and scoped hangar clipping. |
 
-## HUD defaults
+## Aircraft and global defaults
 
-Edit `HUD_PRESENTATION` near the top of `AC8_VR-HUDLayout.lua`. Defaults are depth **1.0**, scale **1.0**, curvature **113.625**, enabled **true**.
+`data/AC8_VR-AircraftPresets.json` is the single aircraft data set. Entries can contain camera offsets, HUD layout, flight UI Size and cockpit-size/world-scale preferences. Unset fields use their default/fallback. Only a few aircraft are pre-tuned.
 
-Depth is UI distance in metres, scale is UI size, and curvature is cylinder angle in degrees. This also selects cylindrical UI. Values apply once per Lua session, after cinematic/hangar recovery releases ownership. Depth/scale must be 0.01–100; curvature must be 1–359. They do not change world scale or the plane camera. Set `enabled=false` to opt out.
+`data/AC8_VR-HUDDefaults.json` stores default/shared HUD layouts separately. **Save current HUD as global default** updates the fallback/shared layouts; **Save current camera as global default** changes the default position. Neither overwrites per-aircraft presets.
 
-## Aircraft offsets
+**Enable per-plane settings** disables all aircraft overrides without deleting data. **Use default HUD layout for all planes** selects the separate shared layout and does not overwrite custom aircraft layouts. The reset button reloads the layout selected by the current mode and its fallback.
 
-`data/AC8_VR-PerPlaneCameraOffsets.lua` returns a settings table. `forward`, `right` and `up` are absolute UEVR menu values, each between -100 and 100.
+Adjust UI Size in UEVR and save it for the plane, either with its separate save button or a HUD save. Flight UI Size includes pause/retry; other modes use the user's normal size. Cockpit size applies only to cockpit view and changes perceived scale, not headset FOV. Its save is included with cockpit-camera saves.
 
-- Default and F/A-18C: forward -18, right 0, up 5.
-- F-4E: forward -10, right 0, up 5.
-- Other aircraft: default until their commented row is enabled and tuned.
+The FPM follows ladder movement/scale and retains native velocity motion. Separate FPM alignment controls provide an additional trim. The rejected cockpit FOV experiment and combined radar/wingman/mission mover are not included.
 
-The exact `BP_PlayerPlane_..._C` key identifies an aircraft class. Detection uses the current view target and verifies its first-person camera owner. Edits are checked every 60 engine ticks. Invalid edits retain the last valid configuration; a missing file disables overrides. Disabling previously owned offsets restores the configured default. Cinematics/hangars retain priority. Manual camera tuning persists until the next aircraft/configuration/ownership change.
+## First launch and runtime state
 
-## Advanced data controls
+The editable `HUD_PRESENTATION` block in HUD Layout supplies initial distance 1m, size 1 and curvature 113.625 degrees. The generated `AC8_VR-HUDPresentationSetup.json` marker admits this once; later saved UEVR changes are respected. It must be absent from a fresh-install archive and retained for an existing user's profile.
 
-These files live under `data`. Keep valid JSON syntax and edit one setting at a time. Legacy storage names and schema versions remain for compatibility.
+Other supplied `AC8_VR-*Controls.json` files contain feature settings. Changes made directly on disk generally require a script/game restart; prefer the exposed controls. Recovery journals and baseline/cache files are generated for functional restoration and should not be copied into fresh packages. Back up the profile before changing files.
 
-| File | Purpose |
-|---|---|
-| `ac8_workshop_v2_controls.json` | Group and individual widget placement/scale using stable widget paths. |
-| `ac8_workshop_target_controls.json` | World-target box, label/font scales and line spacing. |
-| `ac8_world_target_controls.json` | Flat-style label offsets, left-label drop and cyan target-material saturation. |
-| `ac8_offscreen_group_controls.json` | Whole off-screen group horizontal offset/scale. |
-| `ac8_target_arrow_shift_controls.json` | Native locator offsets and common scale. |
-| `ac8_wingman_status_controls.json` | Wingman placement, radar-follow behavior and gap. |
-| `ac8_bomb_landing_controls.json` | Landing projection FOV adjustment. |
-| `ac8_hangar_coverage_controls.json` | Horizontal/vertical cinematic and hangar coverage. |
-| `ac8_pause_controls.json` | Scoped pause duplicate-tick guard. |
-| `ac8_tutorial_fill_controls.json` | Tutorial frame/background scale, alpha and inset. |
-| `ac8_escort_draw_scale_enabled.flag` | Enables native billboard scale support; preserve the supplied file. |
-
-Generated `ac8_cinematic_ui_restore.json` and `ac8_hangar_restore_v48.json` are recovery journals, not defaults to share. `ac8_hud_layout_cache.json` stores local calibration. A legacy `ac8_ladder.json` may be read for custom instrument values; fresh installs use supplied controls and built-in defaults.
-
-## Color and masks
-
-Target saturation works on current-world dynamic material instances and checks their cyan color parameter, preserving alpha and peak energy. It does not classify flattened tutorial, ocean or text pixels as allies. Shared HUD composition still uses alpha/color coverage tests for dark panels, borders and black fades; it is not completely threshold-free. Radio follows common glow. The broad tutorial no-glow rectangle is not reinstated.
+All scripts/data/plugin names use `AC8_VR-`; `ac8-hud-assets` and every file inside it are intentionally exempt. Standard UEVR config/folder names remain standard. Personal UEVR `cameras.txt` slots are separate and are not supplied.

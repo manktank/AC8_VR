@@ -20,11 +20,14 @@
 #include <mutex>
 #include <utility>
 #include <vector>
+#include <string_view>
 #include "../../vendor/uevr/backend-api.h"
 #include "../backend/backend_boundary.h"
 #include "../backend/xr_subset.h"
 #include "xr_dispatch_guards.h"
 #include "acquired_images.h"
+#include "portable-layer-api.h"
+#include "ofxr_dispatch.h"
 
 namespace openxr_handoff {
 using Session=void*;
@@ -56,6 +59,14 @@ static_assert(sizeof(SessionCreateInfo)==32&&sizeof(GraphicsBinding)==32&&
               sizeof(SwapchainCreateInfo)==64&&sizeof(Image)==24);
 static_assert(sizeof(acquired_images::ReleaseInfo)==16&&sizeof(xr_read::EndInfo)==40);
 
+struct Status {
+ const char* route="unresolved";const char* attach_state="not_attempted";
+ bool ready=false,enabled=false,binding=false,disabled=false,suspended=false;
+ unsigned hook_failure=99;
+ const char* lookup_name="none";const char* provider="none";int32_t lookup_result=0;
+ bool fallback_enabled=false;
+
+};
 class Bridge {
     friend struct LateAttachFixture;
     using CreateSessionFn=Result(__stdcall*)(Instance,const SessionCreateInfo*,Session*);
@@ -67,6 +78,8 @@ class Bridge {
     using ReleaseFn=Result(__stdcall*)(Swapchain,const acquired_images::ReleaseInfo*);
     using EndSessionFn=Result(__stdcall*)(Session);
     using BeginFrameFn=Result(__stdcall*)(Session,const Base*);
+    using BeginSessionFn=Result(__stdcall*)(Session,const Base*);
+    using DestroySessionFn=Result(__stdcall*)(Session);
     using EndFrameFn=Result(__stdcall*)(Session,const xr_read::EndInfo*);
     struct Chain {Swapchain handle=0;Session session=nullptr;uint64_t generation=0,held_frame=0;
         uint32_t count=0;std::array<Microsoft::WRL::ComPtr<ID3D12Resource>,16> images{};
@@ -75,15 +88,18 @@ class Bridge {
     std::recursive_mutex transaction_;
     acquired_images::Bookkeeper images_{release_info_type};
     std::array<Chain,16> chains_{};
-    Binding binding_{};Callbacks callbacks_{};
+    Binding binding_{};Callbacks callbacks_{};Status status_{};
     uint64_t frame_=0;uint32_t observed_sessions_=0;
     bool frame_open_=false,disabled_=false,committing_=false,fatal_frame_=false;
+    bool session_suspended_=false;
     std::atomic<bool> ready_{false};
     HookApi hooks_{};unsigned char* backend_=nullptr;
+    std::array<void*,12> dispatch_{};
     CreateSessionFn create_session_=nullptr;CreateSwapchainFn create_swapchain_=nullptr;
     DestroySwapchainFn destroy_swapchain_=nullptr;EnumFn enumerate_=nullptr;
     AcquireFn acquire_=nullptr;WaitFn wait_=nullptr;ReleaseFn release_=nullptr;
     EndSessionFn end_session_=nullptr;BeginFrameFn begin_frame_=nullptr;EndFrameFn end_frame_=nullptr;
+    BeginSessionFn begin_session_=nullptr;DestroySessionFn destroy_session_=nullptr;
     static void pin_anchor(){}
     static int install_from_api(void* target,void* detour,void** original,void* context){
         const auto* api=static_cast<const UEVR_PluginInitializeParam*>(context);
@@ -100,9 +116,11 @@ class Bridge {
     template<typename Fn> bool install(size_t entry,void* detour,Fn& original){
         static_assert(sizeof(Fn)==sizeof(void*),"unsupported function pointer ABI");
         if(!hooks_.install)return false;
-        auto* target=backend_+xr_dispatch_guards::entries[entry].rva;
+        auto* target=dispatch_[entry];
+        if(!target)return false;
         // Installer must publish the trampoline before enabling the detour.
-        return hooks_.install(target,detour,reinterpret_cast<void**>(&original),hooks_.context)>=0&&original;
+        const bool okay=hooks_.install(target,detour,reinterpret_cast<void**>(&original),hooks_.context)>=0&&original;
+        if(!okay){status_.hook_failure=static_cast<unsigned>(entry);status_.attach_state="hook_install_failed";}return okay;
     }
     Chain* chain(Swapchain handle){for(auto& c:chains_)if(c.handle==handle)return &c;return nullptr;}
     Chain* vacant(){for(auto& c:chains_)if(!c.handle)return &c;return nullptr;}
@@ -120,7 +138,7 @@ class Bridge {
         return okay;
     }
     bool effect(Session session){return ready_.load(std::memory_order_acquire)&&!disabled_&&
-        binding_&&binding_.session==session&&images_.mutation_enabled();}
+        !session_suspended_&&binding_&&binding_.session==session&&images_.mutation_enabled();}
     bool disable_effect(){disabled_=true;frame_open_=false;return images_.disable(actual_release());}
     static bool read_binding(const SessionCreateInfo* info,Session* output,GraphicsBinding* binding,Session* session){
         __try{
@@ -161,6 +179,10 @@ class Bridge {
     }
 public:
     Bridge()=default;Bridge(const Bridge&)=delete;Bridge& operator=(const Bridge&)=delete;
+    Status status(){std::lock_guard<std::recursive_mutex> guard(transaction_);
+        auto d=status_;d.ready=ready_;d.enabled=effect(binding_.session);d.binding=bool(binding_);
+        d.disabled=disabled_;d.suspended=session_suspended_;
+        return d;}
     ~Bridge(){if(active_.load()==this)std::terminate();}
     // UEVR initializes plugins after creating its XR session, but before its
     // swapchains. Its public renderer data and XR graphics binding both use
@@ -178,10 +200,51 @@ public:
     bool attach(const UEVR_PluginInitializeParam* api,Callbacks callbacks,HookApi injection={}){
         std::lock_guard<std::recursive_mutex> guard(transaction_);
         if(!api||!api->functions||!api->functions->register_inline_hook)return false;
-        HMODULE module=GetModuleHandleW(L"UEVRBackend.dll");if(!module)return false;
-        wchar_t path[32768]{};std::string hash;
-        if(!GetModuleFileNameW(module,path,32768)||!boundary::file_hash(path,hash)||
-           hash!=boundary::expected_hash||!guarded_image(reinterpret_cast<unsigned char*>(module)))return false;
+        if(ready_)return true;
+        if(disabled_)return false; // Never retry a partially installed hook set.
+        
+        status_.route="portable_openxr";status_.attach_state="resolving_public_dispatch";
+        status_.lookup_name="none";status_.lookup_result=0;
+        HMODULE module=nullptr;
+        const auto instance=api->openxr&&api->openxr->get_xr_instance?reinterpret_cast<Instance>(api->openxr->get_xr_instance()):nullptr;
+        if(!instance){status_.attach_state="waiting_for_xr_instance";return false;}
+        // UEVR can statically link a different loader from openxr_loader.dll.
+        // Resolve through our negotiated layer in the ACTIVE loader's chain.
+        const auto layer=GetModuleHandleW(L"AC8_VR-OpenXRBridge.dll");
+        const auto layer_proc=layer?reinterpret_cast<portable_layer::Resolve>(GetProcAddress(layer,"ac8_openxr_layer_resolve")):nullptr;
+        bool resolved=false;
+        ofxr_dispatch::Table application{};
+        const auto ofxr=ofxr_dispatch::find(instance,application);
+        if(ofxr==ofxr_dispatch::Outcome::incomplete){status_.attach_state="ofxr_application_dispatch_incomplete";return false;}
+        if(ofxr==ofxr_dispatch::Outcome::ready){
+            for(size_t i=0;i<dispatch_.size();++i)dispatch_[i]=reinterpret_cast<void*>(application[i]);
+            status_.provider="ofxr_negotiated_api_layer";resolved=true;
+        }else{
+            const auto get_proc=layer_proc;
+            if(!get_proc){status_.attach_state="negotiated_layer_unavailable";return false;}
+            status_.provider="negotiated_api_layer";
+            resolved=true;
+            for(size_t i=0;i<dispatch_.size();++i){
+                const auto name=i<10?xr_dispatch_guards::entries[i].name:i==10?"xrBeginSession":"xrDestroySession";
+                portable_layer::Function address=nullptr;
+                const auto result=get_proc(instance,name,&address);
+                if(result!=0||!address){
+                    status_.lookup_name=name;status_.lookup_result=result;
+                    status_.attach_state="public_function_lookup_failed";resolved=false;break;
+                }
+                dispatch_[i]=reinterpret_cast<void*>(address);
+            }
+        }
+        if(!resolved){
+            dispatch_.fill(nullptr);return false; // No SHA/RVA fallback in this build.
+        }
+        for(auto* address:dispatch_){HMODULE owner=nullptr;
+            if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,reinterpret_cast<LPCWSTR>(address),&owner)){
+                status_.attach_state="dispatch_owner_pin_failed";dispatch_.fill(nullptr);return false;
+            }
+        }
+        status_.route=ofxr==ofxr_dispatch::Outcome::ready?"ofxr_negotiated_api_layer":"negotiated_api_layer";
+        status_.lookup_name="none";status_.lookup_result=0;
         HMODULE own=nullptr;
         if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
               reinterpret_cast<LPCWSTR>(&pin_anchor),&own))return false;
@@ -199,13 +262,16 @@ public:
             install(6,reinterpret_cast<void*>(&on_create_session),create_session_)&&
             install(7,reinterpret_cast<void*>(&on_end_frame),end_frame_)&&
             install(8,reinterpret_cast<void*>(&on_create_swapchain),create_swapchain_)&&
-            install(9,reinterpret_cast<void*>(&on_enumerate),enumerate_);
+            install(9,reinterpret_cast<void*>(&on_enumerate),enumerate_)&&
+            install(10,reinterpret_cast<void*>(&on_begin_session),begin_session_)&&
+            install(11,reinterpret_cast<void*>(&on_destroy_session),destroy_session_);
+        if(okay)status_.attach_state="hooks_installed";
         ready_.store(okay,std::memory_order_release);
         if(!okay)disabled_=true; // Keep partial hooks and trampolines resident.
         return okay;
     }
     bool enabled(){std::lock_guard<std::recursive_mutex> guard(transaction_);
-        return ready_.load()&&!disabled_&&binding_&&images_.mutation_enabled();}
+        return effect(binding_.session);}
     void disable(){std::lock_guard<std::recursive_mutex> guard(transaction_);disable_effect();}
     bool observed_image(ID3D12Resource* resource,acquired_images::Token& token,
                         uint64_t& frame,Binding& binding){
@@ -346,7 +412,27 @@ public:
         std::lock_guard<std::recursive_mutex> lock(b->transaction_);
         if(b->committing_||!b->flush_all())return runtime_failure;
         const Result result=b->end_session_(s);
-        if(s==b->binding_.session&&(result==0||result==acquired_images::session_loss_pending))b->disable_effect();
+        if(s==b->binding_.session&&result==0){b->frame_open_=false;b->session_suspended_=true;}
+        else if(s==b->binding_.session&&result==acquired_images::session_loss_pending)b->disable_effect();
+        return result;
+    }
+    static Result __stdcall on_begin_session(Session s,const Base* info){
+        Bridge* b=active_;if(!b||!b->begin_session_)return runtime_failure;
+        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        const Result result=b->begin_session_(s,info);
+        if(result==0&&s==b->binding_.session&&!b->disabled_&&b->images_.mutation_enabled())b->session_suspended_=false;
+        return result;
+    }
+    static Result __stdcall on_destroy_session(Session s){
+        Bridge* b=active_;if(!b||!b->destroy_session_)return runtime_failure;
+        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        if(b->committing_||!b->flush_all())return runtime_failure;
+        const Result result=b->destroy_session_(s);
+        if(result==0&&s==b->binding_.session){
+            for(auto& c:b->chains_)c={};b->binding_={};b->images_.destroyed_session();
+            b->observed_sessions_=0;b->frame_open_=b->session_suspended_=b->fatal_frame_=false;
+            b->disabled_=false;
+        }
         return result;
     }
     static Result __stdcall on_begin_frame(Session s,const Base* info){

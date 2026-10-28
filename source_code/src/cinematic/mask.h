@@ -1,8 +1,3 @@
-// OpenXR presentation and transition compositor. Owns auxiliary images for
-// cinematic windows, hangar coverage and loading/fade cover. Image acquisition,
-// GPU completion and release must stay paired, including failure paths.
-// Lua supplies intent; native code uses the current submission geometry.
-
 #pragma once
 #include <d3d12.h>
 #include <d3dcompiler.h>
@@ -15,6 +10,8 @@
 #include "mask_geometry.h"
 #include "native_fade.h"
 #include "movie_window.h"
+
+
 #include "lens_projection.h"
 #include "../backend/backend_boundary.h"
 namespace cinema_mask {
@@ -28,12 +25,13 @@ static_assert(sizeof(Create)==64 && sizeof(Image)==24 && sizeof(Wait)==24);
 inline const UEVR_PluginInitializeParam* host=nullptr;
 inline std::atomic<bool> requested=false;
 inline std::atomic<bool> full_view=false;
+inline std::atomic<bool> expanded_view=false;
 inline std::atomic<bool> hangar_crop=false;
 inline std::atomic<float> full_view_coverage=2.0f;
 inline std::atomic<float> full_view_vertical=1.25f;
-inline std::atomic<uint64_t> full_view_frames=0;
+
 inline std::atomic<const char*> state="waiting_session";
-inline std::atomic<uint64_t> frames=0,masked=0,skipped=0;
+
 inline std::atomic<uint64_t> activation=0;
 inline uint64_t anchored_activation=0;
 inline Window anchored_window{};
@@ -64,7 +62,7 @@ inline std::atomic<bool> failed=false,attached=false;
 inline uint64_t serial=0;
 struct Transition {float opacity=0;bool loading=false;std::array<float,3> color{};std::array<float,4> bounds{{0,0,1,1}};};
 inline Transition transition{};
-inline std::atomic<uint64_t> transition_frames=0;
+
 constexpr int pixels=1024;
 inline void check(HRESULT r){if(FAILED(r))throw r;}
 inline float ui_distance() {
@@ -125,7 +123,7 @@ inline bool initialize_images(Handle s) {
     }
     state="ready";return true;
 }
-inline bool draw(const std::array<Aperture,2>& holes,const std::array<std::array<Clip,6>,2>* vertices=nullptr) {
+inline bool draw(const std::array<Aperture,2>& holes,const std::array<std::array<Clip,6>,2>* vertices=nullptr,bool=false) {
     if(!acquired){const Base a{55,nullptr};if(acquire(chain,&a,&index)!=0||index>=image_count){fail("acquire_failed");return false;}acquired=true;}
     const Wait w{56,nullptr,0};const auto wr=wait_image(chain,&w);
     if(wr==1){state="waiting_mask_image";return false;}
@@ -140,14 +138,20 @@ inline bool draw(const std::array<Aperture,2>& holes,const std::array<std::array
         unsigned char* data=nullptr;check(slot.vertices->Map(0,nullptr,reinterpret_cast<void**>(&data)));for(unsigned eye=0;eye<2;++eye)std::memcpy(data+eye*256,(*vertices)[eye].data(),sizeof(Clip)*6);slot.vertices->Unmap(0,nullptr);
     }
     check(slot.allocator->Reset());check(slot.commands->Reset(slot.allocator.Get(),nullptr));
+    static_cast<void>(0);
+    {
+    
     // OpenXR D3D12 guarantees RENDER_TARGET after wait and requires it at release.
     constexpr float black[4]={0,0,0,1},transparent[4]={0,0,0,0};
     for(unsigned eye=0;eye<2;++eye){const D3D12_CPU_DESCRIPTOR_HANDLE target{rtvs->GetCPUDescriptorHandleForHeapStart().ptr+size_t(index*2+eye)*rtv_stride};
         slot.commands->ClearRenderTargetView(target,black,0,nullptr);
         if(vertices){const D3D12_VIEWPORT viewport{0,0,float(pixels),float(pixels),0,1};const D3D12_RECT scissor{0,0,pixels,pixels};slot.commands->SetPipelineState(pipeline.Get());slot.commands->SetGraphicsRootSignature(root.Get());slot.commands->SetGraphicsRootConstantBufferView(0,slot.vertices->GetGPUVirtualAddress()+eye*256);slot.commands->RSSetViewports(1,&viewport);slot.commands->RSSetScissorRects(1,&scissor);slot.commands->OMSetRenderTargets(1,&target,FALSE,nullptr);slot.commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);slot.commands->DrawInstanced(3,1,0,0);}
         else{const auto& h=holes[eye];const D3D12_RECT rect{h.left,h.top,h.right,h.bottom};slot.commands->ClearRenderTargetView(target,transparent,1,&rect);}}
-    check(slot.commands->Close());ID3D12CommandList* list=slot.commands.Get();queue->ExecuteCommandLists(1,&list);
-    check(queue->Signal(fence.Get(),++serial));slot.fence_value=serial;
+    } // Resolve timestamps before Close.
+    check(slot.commands->Close());ID3D12CommandList* list=slot.commands.Get();static_cast<void>(0);queue->ExecuteCommandLists(1,&list);
+    const auto signal=queue->Signal(fence.Get(),++serial);
+    static_cast<void>(0);
+    check(signal);slot.fence_value=serial;
     const auto result=release(chain,&r);acquired=waited=false;if(result!=0){fail("release_failed");return false;}return true;
 }
 inline Result transition_frame(Handle s,const xr_read::EndInfo* info,const xr_read::Projection* source_override=nullptr){
@@ -180,17 +184,41 @@ inline Result transition_frame(Handle s,const xr_read::EndInfo* info,const xr_re
             parameters[eye][3].w=((transition.bounds[0]+transition.bounds[2])*0.5f-0.5f)*width;
             parameters[eye][5].w=(0.5f-(transition.bounds[1]+transition.bounds[3])*0.5f)*height;}
     }
-    try{if(!chain&&!initialize_images(s)){fail("transition_initialization_failed");return original_end(s,info);}if(!draw(holes,&parameters))return original_end(s,info);}catch(...){fail("transition_gpu_failed");return original_end(s,info);}
+    try{if(!chain&&!initialize_images(s)){fail("transition_initialization_failed");return original_end(s,info);}if(!draw(holes,&parameters,true))return original_end(s,info);}catch(...){fail("transition_gpu_failed");return original_end(s,info);}
     std::array<xr_read::ProjectionView,2> views{mask_view(source->views[0],chain,0,pixels),mask_view(source->views[1],chain,1,pixels)};
     const xr_read::Projection cover{35,nullptr,2,source->space,2,views.data()};std::array<const xr_read::Layer*,16> layers{};unsigned count=0;
     for(unsigned i=0;i<info->layerCount;++i){layers[count++]=info->layers[i];if(transition.loading&&i==source_index)layers[count++]=reinterpret_cast<const xr_read::Layer*>(&cover);}
     // Loading hides the scene below its UI. Fade extension lies outside the
     // existing UI frame, so the center keeps precisely the authored opacity.
     if(!transition.loading)layers[count++]=reinterpret_cast<const xr_read::Layer*>(&cover);
-    auto output=*info;output.layerCount=count;output.layers=layers.data();const auto result=original_end(s,&output);if(result>=0)++transition_frames;return result;
+    auto output=*info;output.layerCount=count;output.layers=layers.data();const auto result=original_end(s,&output);if(result>=0)static_cast<void>(0);return result;
 }
 // Reuse the working stereo movie presentation, with each complete eye image
 // expanded to its original FOV. Original curved UI layers pass through intact.
+
+inline void expanded_reference(const xr_read::EndInfo* info){
+    const xr_read::Projection* source=nullptr;
+    for(unsigned i=0;i<info->layerCount;++i)if(info->layers[i]&&info->layers[i]->type==35){if(source)return;source=reinterpret_cast<const xr_read::Projection*>(info->layers[i]);}
+    if(!source||!source->space||source->viewCount!=2||!source->views)return;
+        // The old cinema window supplies only a reference angular size for the
+        // director's lens. Its rectangular boundary does not crop the scene.
+        // One scalar changes both native eye-projection axes equally.
+        Window reference{};bool found=false;
+        for(unsigned i=0;i<info->layerCount;++i){const auto* layer=info->layers[i];
+            if(!layer||layer->space!=source->space||(layer->type!=xr_read::quad&&layer->type!=xr_read::cylinder))continue;
+            const auto& sub=layer->type==xr_read::quad?reinterpret_cast<const xr_read::Quad*>(layer)->subImage:reinterpret_cast<const xr_read::Cylinder*>(layer)->subImage;
+            if(host->vr&&host->vr->get_ui_width&&host->vr->get_ui_height&&(sub.imageRect.extent.width!=static_cast<int>(host->vr->get_ui_width())||sub.imageRect.extent.height!=static_cast<int>(host->vr->get_ui_height())))continue;
+            if(flat_window(layer,reference)){found=true;break;}}
+        const float distance=ui_distance();
+        double limit_x=1e6,limit_y=1e6;
+        for(unsigned eye=0;eye<2;++eye){const auto& f=source->views[eye].fov;
+            const double l=std::tan(f.angleLeft),r=std::tan(f.angleRight),u=std::tan(f.angleUp),d=std::tan(f.angleDown);
+            if(!std::isfinite(l+r+u+d)||l>=0||r<=0||u<=0||d>=0)return;
+            limit_x=std::min(limit_x,std::min(-l,r));limit_y=std::min(limit_y,std::min(u,-d));}
+        {std::lock_guard<std::mutex> lens_guard(cinematic_lens::mutex);
+            cinematic_lens::view=found?cinematic_lens::View{reference.width,reference.height,distance,limit_x,limit_y}:cinematic_lens::View{};}
+    static_cast<void>(0);state=found?"expanded_native_projection":"expanded_waiting_lens_reference";
+}
 inline Result full_view_frame(Handle s,const xr_read::EndInfo* info){
     const xr_read::Projection* source=nullptr;
     for(unsigned i=0;i<info->layerCount;++i)if(info->layers[i]&&info->layers[i]->type==35){if(source)return original_end(s,info);source=reinterpret_cast<const xr_read::Projection*>(info->layers[i]);}
@@ -217,11 +245,11 @@ inline Result full_view_frame(Handle s,const xr_read::EndInfo* info){
     }
     std::array<const xr_read::Layer*,16> layers{};unsigned count=0;
     for(unsigned i=0;i<info->layerCount;++i){if(info->layers[i]==reinterpret_cast<const xr_read::Layer*>(source)){layers[count++]=reinterpret_cast<const xr_read::Layer*>(&images[0]);layers[count++]=reinterpret_cast<const xr_read::Layer*>(&images[1]);}else layers[count++]=info->layers[i];}
-    auto output=*info;output.layerCount=count;output.layers=layers.data();++full_view_frames;state="hangar_full_view_movie";
+    auto output=*info;output.layerCount=count;output.layers=layers.data();static_cast<void>(0);state="hangar_full_view_movie";
     return transition.opacity>0?transition_frame(s,&output,source):original_end(s,&output);
 }
 inline Result __stdcall end_frame(Handle s,const xr_read::EndInfo* info) {
-    std::lock_guard<std::recursive_mutex> guard(lock);++frames;
+    std::lock_guard<std::recursive_mutex> guard(lock);static_cast<void>(0);
     const auto baseTransition=transition;
     struct RestoreTransition{Transition value;~RestoreTransition(){transition=value;}}restoreTransition{baseTransition};
     float authoredOpacity=0;
@@ -231,16 +259,22 @@ inline Result __stdcall end_frame(Handle s,const xr_read::EndInfo* info) {
         if(!waited){const Wait w{56,nullptr,0};waited=wait_image(chain,&w)==0;}
         if(waited){const Base r{57,nullptr};if(release(chain,&r)!=0)fail("off_release_failed");acquired=waited=false;}
     }
-    if((!requested&&!full_view&&transition.opacity<=0)||failed||!info||info->type!=12||!info->layers||!info->layerCount||info->layerCount>13)return original_end(s,info);
-    if(host->openxr->get_xr_session()!=s||(session&&session!=s)){state="session_changed_skipped";++skipped;return original_end(s,info);}
+    if((!requested&&!full_view&&!expanded_view&&transition.opacity<=0)||failed||!info||info->type!=12||!info->layers||!info->layerCount||info->layerCount>13)return original_end(s,info);
+    if(host->openxr->get_xr_session()!=s||(session&&session!=s)){state="session_changed_skipped";static_cast<void>(0);return original_end(s,info);}
     if(transition.opacity>0&&transition.loading)return transition_frame(s,info);
+    if(expanded_view){
+        expanded_reference(info);
+        // Stage 1 retains the original projection layer, poses, per-eye FOVs,
+        // subimages and all compositor metadata. Existing fades still apply.
+        return transition.opacity>0?transition_frame(s,info):original_end(s,info);
+    }
     if(full_view&&!requested)return full_view_frame(s,info);
     if(transition.opacity>0&&!requested)return transition_frame(s,info);
     const xr_read::Projection* source=nullptr;
     for(unsigned i=0;i<info->layerCount;++i)if(info->layers[i]&&info->layers[i]->type==35){if(source){source=nullptr;break;}source=reinterpret_cast<const xr_read::Projection*>(info->layers[i]);}
     std::array<Aperture,2> holes{};
     if(!source||!source->space||source->viewCount!=2||!source->views||!aperture(source->views[0].fov,pixels,holes[0])||!aperture(source->views[1].fov,pixels,holes[1])){
-        state="projection_layout_skipped";++skipped;return original_end(s,info);}
+        state="projection_layout_skipped";static_cast<void>(0);return original_end(s,info);}
     const auto epoch=activation.load();
     {
         Window candidate{};bool found=false;
@@ -257,7 +291,7 @@ inline Result __stdcall end_frame(Handle s,const xr_read::EndInfo* info) {
         const float distance=frame_distance_override>0?frame_distance_override.load():actual_distance;
         if(found&&frame_size_override>0){const float ratio=frame_size_override.load()/candidate.height;candidate.width*=ratio;candidate.height*=ratio;}
         if(anchored_activation!=epoch || !anchored_window.space){
-            if(!found){state="waiting_window_anchor";++skipped;return original_end(s,info);}
+            if(!found){state="waiting_window_anchor";static_cast<void>(0);return original_end(s,info);}
             anchored_window=candidate;anchored_activation=epoch;anchored_distance=distance;
             std::copy_n(source->views,2,movie_reference.begin());
             if(distance>0&&actual_distance>0)resize_window(anchored_window,candidate,actual_distance,distance);
@@ -267,7 +301,7 @@ inline Result __stdcall end_frame(Handle s,const xr_read::EndInfo* info) {
         }
         shown_width=anchored_window.width;shown_height=anchored_window.height;shown_distance=anchored_distance;
     }
-    if(anchored_window.space!=source->space){state="anchor_space_changed_skipped";++skipped;return original_end(s,info);}
+    if(anchored_window.space!=source->space){state="anchor_space_changed_skipped";static_cast<void>(0);return original_end(s,info);}
     std::array<xr_read::Quad,2> movies{};
     std::array<MovieCrop,2> movie_bounds{};
     double limit_x=1e6,limit_y=1e6;
@@ -275,26 +309,32 @@ inline Result __stdcall end_frame(Handle s,const xr_read::EndInfo* info) {
     {std::lock_guard<std::mutex> lens_guard(cinematic_lens::mutex);cinematic_lens::view={anchored_window.width,anchored_window.height,anchored_distance,limit_x,limit_y};}
     Window movie_window=anchored_window;cinematic_lens::Fit lens_fit{};
     if(cinematic_lens::current(lens_fit)){movie_window.width=static_cast<float>(lens_fit.width);movie_window.height=static_cast<float>(lens_fit.height);}
-    if(!movie_crops(movie_window,anchored_distance,source->views,movie_bounds)){state="movie_crop_skipped";++skipped;return original_end(s,info);}
+    if(!movie_crops(movie_window,anchored_distance,source->views,movie_bounds)){state="movie_crop_skipped";static_cast<void>(0);return original_end(s,info);}
     for(unsigned eye=0;eye<2;++eye){
         if(!movie_quad(movie_window,source->views[eye],movie_bounds[eye],eye,movies[eye])){
-            state="movie_window_layout_skipped";++skipped;return original_end(s,info);}}
+            state="movie_window_layout_skipped";static_cast<void>(0);return original_end(s,info);}}
     const std::array<std::array<Clip,6>,2> vertices{window_parameters(anchored_window,source->views[0],pixels),window_parameters(anchored_window,source->views[1],pixels)};
     bool ready=false;
     try{if(!chain&&!initialize_images(s)){fail("mask_initialization_failed");}if(!failed)ready=draw(holes,&vertices);}catch(...){fail("mask_gpu_failed");}
-    if(!ready){++skipped;return original_end(s,info);}
+    if(!ready){static_cast<void>(0);return original_end(s,info);}
     std::array<xr_read::ProjectionView,2> views{mask_view(source->views[0],chain,0,pixels),mask_view(source->views[1],chain,1,pixels)};
     const xr_read::Projection border{35,nullptr,2,source->space,2,views.data()};
     std::array<const xr_read::Layer*,16> layers{};unsigned layer_count=0;
+    std::array<xr_read::Quad,16> pinned_ui{};unsigned pinned_count=0;
+    const unsigned ui_width=host->vr&&host->vr->get_ui_width?host->vr->get_ui_width():0;
+    const unsigned ui_height=host->vr&&host->vr->get_ui_height?host->vr->get_ui_height():0;
     for(unsigned i=0;i<info->layerCount;++i){
         if(info->layers[i]==reinterpret_cast<const xr_read::Layer*>(source)){
             layers[layer_count++]=reinterpret_cast<const xr_read::Layer*>(&movies[0]);
             layers[layer_count++]=reinterpret_cast<const xr_read::Layer*>(&movies[1]);
             if(hangar_crop)layers[layer_count++]=reinterpret_cast<const xr_read::Layer*>(&border);
+        }else if(!hangar_crop&&anchor_ui_quad(info->layers[i],anchored_window,ui_width,ui_height,pinned_ui[pinned_count])){
+            layers[layer_count++]=reinterpret_cast<const xr_read::Layer*>(&pinned_ui[pinned_count++]);
         }else layers[layer_count++]=info->layers[i];}
     if(!hangar_crop)layers[layer_count++]=reinterpret_cast<const xr_read::Layer*>(&border);
     auto output=*info;output.layerCount=layer_count;output.layers=layers.data();
-    const auto result=original_end(s,&output);if(result<0)fail("masked_submission_failed");else{++masked;state="mask_active";}return result;
+    const auto result=original_end(s,&output);
+    if(result<0)fail("masked_submission_failed");else{static_cast<void>(0);state="mask_active";}return result;
 }
 // SHA-pinned loader internals, independently below the existing HUD wrapper hook.
 // Disassembly: wrapper352A8F reads LoaderInstance+48, then dispatch+118 (xrEndFrame).
@@ -322,9 +362,13 @@ inline void attach() {
     HMODULE own=nullptr;
     if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,reinterpret_cast<LPCWSTR>(&end_frame),&own)){state="pin_failed";return;}
     const auto id=host->functions->register_inline_hook(target,reinterpret_cast<void*>(&end_frame),reinterpret_cast<void**>(&original_end));
-    attached=id>=0&&original_end;state=attached?"attached":"hook_failed";host->functions->log_info("[Cinematic Mask] %s",state.load());
+    attached=id>=0&&original_end;state=attached?"attached":"hook_failed";static_cast<void>(0);
 }
 inline void control(const char* event,const char* data){
+if(event&&data&&!std::strcmp(event,"AC8_CinematicExpanded")){
+    std::lock_guard<std::recursive_mutex> guard(lock);const bool on=!std::strcmp(data,"on");
+    expanded_view=on;full_view=false;if(on){requested=false;hangar_crop=false;++activation;}return;
+}
 if(event&&data&&!std::strcmp(event,"AC8_HangarCrop")){
     std::lock_guard<std::recursive_mutex> guard(lock);
     control("AC8_CinematicMask",data);full_view=false;hangar_crop=requested.load();return;
@@ -348,5 +392,6 @@ if(event&&data&&!std::strcmp(event,"AC8_CinematicMask")){
     else{frame_size_override=0;frame_distance_override=0;}
     if(on&&!requested)++activation;requested=on;
 }}
+
 
 }

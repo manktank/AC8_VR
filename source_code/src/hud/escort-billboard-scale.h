@@ -1,8 +1,4 @@
-// Scale eligible world billboard elements through reflected SetElements.
-// Keep the original and last-applied size separately, including per-axis game
-// updates, so repeated discovery never compounds the requested scale.
-
-// Included after world-targets.cpp provides guarded reflection helpers.
+// Existing reflected billboard setters; refueling uses its separately guarded native layout adapter.
 #include <map>
 #include <set>
 #include <cmath>
@@ -10,17 +6,23 @@
 #include <cstdlib>
 namespace escort_draw {
 struct Sizes {float x,y;};
-struct Saved {std::vector<Sizes> original,last;};
+struct Saved {std::vector<Sizes> original,last;float factor=1;};
 static std::map<std::wstring,Saved> saved;
 static bool enabled=false;
-static unsigned writes=0,failures=0;
+static bool refuel_logged=false;
+static float guideScale(unsigned kind,float value){return kind==1?.25f:kind==4?1.f:value;}
+
 static std::atomic<float> pin_scale{1};
+
+
+static std::atomic<bool> presentation_allowed{true};
 static unsigned componentKind(const std::wstring& name){
     const auto leaf=name.substr(name.rfind(L'.')+1);
-    return leaf==L"EscortBillboardImage"?1u:leaf==L"ClockTargetPinBillboardImage"?2u:leaf==L"AntiClockTargetPinBillboardImage"?3u:0u;
+    return leaf==L"EscortBillboardImage"?1u:leaf==L"ClockTargetPinBillboardImage"?2u:leaf==L"AntiClockTargetPinBillboardImage"?3u:leaf==L"TextureBox"?4u:0u;
 }
 static void control(const char* event,const char* data){
     if(!event||!data)return;
+    if(!std::strcmp(event,"AC8_TargetsPresentation")){presentation_allowed=std::strcmp(data,"off")!=0;return;}
     if(!std::strcmp(event,"AC8_WorldPipScale")){
         char* end=nullptr;const auto value=std::strtof(data,&end);
         if(end&&end!=data&&!*end&&std::isfinite(value)&&value>=.1f&&value<=2.f)pin_scale=value;
@@ -33,8 +35,19 @@ struct View {
     ArrayView array{};int stride=0,x=0,y=0;
     UEVR_UScriptStructHandle structure=nullptr;
 };
+// Only reflected layout is retained. Instance arrays, material references,
+// signed animated sizes and curve data remain freshly read every engine tick.
+struct Layout {int stride=0,x=0,y=0,material=-1;UEVR_UScriptStructHandle structure=nullptr;};
+static std::map<UEVR_UStructHandle,Layout> layout_cache;
+static std::wstring layout_level;
+static void select_layout_level(const std::wstring& level){if(level!=layout_level){layout_cache.clear();layout_level=level;refuel_logged=false;}}
 static bool view(UEVR_UObjectHandle o,View& v){
     auto cls=reinterpret_cast<UEVR_UStructHandle>(host->sdk->uobject->get_class(o));
+    const auto cached=layout_cache.find(cls);
+    if(cached!=layout_cache.end()){
+        const auto& schema=cached->second;v.stride=schema.stride;v.x=schema.x;v.y=schema.y;v.structure=schema.structure;
+        return copy(host->sdk->uobject->get_property_data(o,L"Elements"),v.array)&&v.array.count>=0&&v.array.count<=16&&v.array.capacity>=v.array.count&&v.array.capacity<=4096&&(!v.array.count||v.array.data);
+    }
     auto p=property(cls,L"Elements");if(!p||propertyType(p)!=L"ArrayProperty")return false;
     auto inner=host->sdk->farrayproperty->get_inner(reinterpret_cast<UEVR_FArrayPropertyHandle>(p));
     if(!inner||propertyType(inner)!=L"StructProperty")return false;
@@ -48,7 +61,17 @@ static bool view(UEVR_UObjectHandle o,View& v){
         *spec.second=host->sdk->fproperty->get_offset(f);
         if(*spec.second<0||*spec.second>v.stride-4)return false;
     }
-    return copy(host->sdk->uobject->get_property_data(o,L"Elements"),v.array)&&v.array.count>=0&&v.array.count<=16&&v.array.capacity>=v.array.count&&v.array.capacity<=4096&&(!v.array.count||v.array.data);
+    const bool valid=copy(host->sdk->uobject->get_property_data(o,L"Elements"),v.array)&&v.array.count>=0&&v.array.count<=16&&v.array.capacity>=v.array.count&&v.array.capacity<=4096&&(!v.array.count||v.array.data);
+    if(valid){
+        Layout schema{v.stride,v.x,v.y,-1,v.structure};
+        auto m=property(reinterpret_cast<UEVR_UStructHandle>(v.structure),L"Material");
+        if(m&&propertyType(m)==L"ObjectProperty"){
+            const int offset=host->sdk->fproperty->get_offset(m);
+            if(offset>=0&&offset<=v.stride-static_cast<int>(sizeof(void*)))schema.material=offset;
+        }
+        if(layout_cache.size()>=128)layout_cache.clear();layout_cache[cls]=schema;
+    }
+    return valid;
 }
 static bool sizes(const View& v,std::vector<Sizes>& values){
     values.clear();
@@ -100,25 +123,56 @@ static bool set(UEVR_UObjectHandle o,const View& v,const std::vector<Sizes>& des
     View after;std::vector<Sizes> result;
     return view(o,after)&&sizes(after,result)&&equal(result,desired);
 }
+// Asset-confirmed refueling guide: its TextureBox uses the same screen-space
+// billboard path as target pips, but belongs to a different native actor family.
 static bool nameMatches(const std::wstring& name,const std::wstring& ownerClass){
-    return ownerClass==L"ChronicleTargetContainerActorBP_C"&&name.find(L".PersistentLevel.")!=std::wstring::npos&&
-        name.find(L"Default__")==std::wstring::npos&&componentKind(name)!=0;
+    if(name.find(L".PersistentLevel.")==std::wstring::npos||name.find(L"Default__")!=std::wstring::npos)return false;
+    const auto kind=componentKind(name);
+    if(ownerClass==L"BP_LiveAerialRefuel3DUIActor_C")return kind==4;
+    return ownerClass==L"ChronicleTargetContainerActorBP_C"&&kind>=1&&kind<=3;
 }
-static bool eligible(UEVR_UObjectHandle o,const std::wstring& name){
+static bool refuelMaterialName(const std::wstring& name){
+    const auto leaf=name.substr(name.rfind(L'.')+1);
+    return leaf==L"M_HUD_Texture3DUI_ScreenSpaceNoFollowHMD_000"||
+        leaf.rfind(L"MID_M_HUD_Texture3DUI_ScreenSpaceNoFollowHMD_000_",0)==0;
+}
+static bool refuelMaterial(UEVR_UObjectHandle material){
+    for(unsigned depth=0;material&&depth<6;++depth){
+        if(refuelMaterialName(billboardFname(host->sdk->uobject->get_fname(material))))return true;
+        UEVR_UObjectHandle parent=nullptr;
+        if(!copy(host->sdk->uobject->get_property_data(material,L"Parent"),parent)||parent==material)return false;
+        material=parent;
+    }
+    return false;
+}
+static bool eligible(UEVR_UObjectHandle o,const std::wstring& name,View* current=nullptr){
     auto actor=host->sdk->uobject->get_outer(o);
     auto cls=actor?host->sdk->uobject->get_class(actor):nullptr;
     if(!cls||!nameMatches(name,billboardFname(host->sdk->uobject->get_fname(reinterpret_cast<UEVR_UObjectHandle>(cls)))))return false;
-    View v;if(!view(o,v)||v.array.count!=1)return false;
-    auto material=property(reinterpret_cast<UEVR_UStructHandle>(v.structure),L"Material");
-    if(!material||propertyType(material)!=L"ObjectProperty")return false;
-    const int offset=host->sdk->fproperty->get_offset(material);
+    const auto kind=componentKind(name);
+    View v;if(!view(o,v)||v.array.count<1||(kind!=4&&v.array.count!=1))return false;
+    auto componentClass=reinterpret_cast<UEVR_UStructHandle>(host->sdk->uobject->get_class(o));
+    const auto schema=layout_cache.find(componentClass);if(schema==layout_cache.end())return false;
+    const int offset=schema->second.material;
     if(offset<0||offset>v.stride-static_cast<int>(sizeof(void*)))return false;
+    if(kind==4){
+        // Retain every original texture, opacity/distance curve, screen-space
+        // flag and animated signed size. Require the asset's actual material.
+        for(int i=0;i<v.array.count;++i){
+            UEVR_UObjectHandle material=nullptr;
+            if(!copy(v.array.data+size_t(i)*size_t(v.stride)+offset,material)||!refuelMaterial(material))return false;
+        }
+        if(current)*current=v;
+        return true;
+    }
     UEVR_UObjectHandle m=nullptr;
     if(!copy(v.array.data+offset,m)||!m)return false;
-    const auto materialPath=objectName(m);const auto kind=componentKind(name);
-    return kind==1?materialPath.find(L".MID_M_HUD_Container_Escort_000_")!=std::wstring::npos:
-        kind==2?materialPath.find(L".MID_MI_HUD_Multi_TargetPinClockwise_002_")!=std::wstring::npos:
-        kind==3&&materialPath.find(L".MID_MI_HUD_Multi_TargetPinAntiClockwise_002_")!=std::wstring::npos;
+    const auto matches=[&](const std::wstring& path){return kind==1?path.find(L".MID_M_HUD_Container_Escort_000_")!=std::wstring::npos:
+        kind==2?path.find(L".MID_MI_HUD_Multi_TargetPinClockwise_002_")!=std::wstring::npos:
+        kind==3&&path.find(L".MID_MI_HUD_Multi_TargetPinAntiClockwise_002_")!=std::wstring::npos;};
+    const bool match=matches(L"."+billboardFname(host->sdk->uobject->get_fname(m)))||matches(objectName(m));
+    if(match&&current)*current=v;
+    return match;
 }
 static Saved desiredState(const std::vector<Sizes>& now,const Saved* previous,float factor=.25f){
     Saved s{now,now};
@@ -129,49 +183,75 @@ static Saved desiredState(const std::vector<Sizes>& now,const Saved* previous,fl
             if(std::abs(now[i].y-previous->last[i].y)<=1e-7f)s.original[i].y=previous->original[i].y;
         }
     }
-    s.last=scaled(s.original,factor);return s;
+    s.last=scaled(s.original,factor);s.factor=factor;return s;
+}
+static bool unchanged(const std::vector<Sizes>& now,const Saved& previous,float factor){
+    if(previous.factor!=factor||previous.original.size()!=now.size()||previous.last.size()!=now.size())return false;
+    for(size_t i=0;i<now.size();++i)if(now[i].x!=previous.last[i].x||now[i].y!=previous.last[i].y)return false;
+    return true;
 }
 static bool restore(const std::wstring& name,Saved& s){
     auto o=host->sdk->uobject_array->find_uobject((L"MaterialBillboardComponent "+name).c_str());
     if(!o)return true;
     View v;std::vector<Sizes> now;
     if(!view(o,v)||!sizes(v,now))return false;
-    if(equal(now,s.last)&&!set(o,v,s.original)){++failures;return false;}
+    if(equal(now,s.last)&&!set(o,v,s.original)){static_cast<void>(0);return false;}
     return true;
 }
+#include "refueling-layout-group.h"
 [[maybe_unused]] static void tick(){
+    if(!presentation_allowed.load())return;
     if(directory.empty()){
         wchar_t p[32768]{};host->functions->get_persistent_dir(p,32768);directory=std::filesystem::path(p)/L"data";
+        std::error_code error;enabled=std::filesystem::exists(directory/L"AC8_VR-EscortDrawScaleEnabled.flag",error);
     }
-    std::error_code error;
-    if(tickCount%30==0)enabled=std::filesystem::exists(directory/L"ac8_escort_draw_scale_enabled.flag",error);
+
     std::wstring level;
     auto pc=host->sdk->functions->get_player_controller(0);UEVR_UObjectHandle hud=nullptr;
     if(pc&&copy(host->sdk->uobject->get_property_data(pc,L"MyHUD"),hud)&&hud){auto name=objectName(hud);auto at=name.find(L".PersistentLevel.");if(at!=std::wstring::npos&&name.find(L"LiveMainHUDParent4K_C_")!=std::wstring::npos)level=name.substr(0,at+17);}
-    std::set<std::wstring> seen;unsigned matches=0,pinMatches=0;
+    select_layout_level(level);
+    std::set<std::wstring> seen,guideSeen;unsigned matches=0,pinMatches=0,refuelMatches=0;
     if((enabled||pin_scale.load()!=1)&&!level.empty()){
         auto c=host->sdk->uobject_array->find_uobject(L"Class /Script/Engine.MaterialBillboardComponent");
         if(c){
-            std::vector<UEVR_UObjectHandle> objects(4096);
+            std::array<UEVR_UObjectHandle,4096> objects{}; // Call-local scratch; no retained object lifetime.
             int count=host->sdk->uobject_hook->get_objects_by_class(reinterpret_cast<UEVR_UClassHandle>(c),objects.data(),4096,false);
             for(int i=0;i<std::min(count,4096);++i){
                 auto o=objects[static_cast<size_t>(i)];if(!o)continue;
-                auto name=objectName(o);if(name.compare(0,level.size(),level)!=0||!eligible(o,name))continue;
+                // The exact leaf-name test is independent of outer paths and
+                // rejects unrelated billboards before constructing full names.
+                if(!componentKind(billboardFname(host->sdk->uobject->get_fname(o))))continue;
+                View v;auto name=objectName(o);if(name.compare(0,level.size(),level)!=0||!eligible(o,name,&v))continue;
                 const auto kind=componentKind(name);if(kind==1&&!enabled)continue;
-                ++matches;if(kind>1){++pinMatches;}
-                View v;std::vector<Sizes> now;if(!view(o,v)||!sizes(v,now)||now.empty())continue;
+                ++matches;if(kind==4)++refuelMatches;else if(kind>1){++pinMatches;static_cast<void>(0);}
+                if(kind==4){
+                    auto actor=host->sdk->uobject->get_outer(o);
+                    guideSeen.insert(name);
+                    refueling_group::update(actor,name,pin_scale.load());
+                    continue; // Never scale individual refueling Elements here.
+                }
+                std::vector<Sizes> now;if(!sizes(v,now)||now.empty())continue;
                 seen.insert(name);
                 auto it=saved.find(name);
+                const auto factor=guideScale(kind,pin_scale.load());
+                if(it!=saved.end()&&unchanged(now,it->second,factor))continue;
                 
                 // Game-generated new sizes become the new baseline; never compound our own output.
-                auto state=desiredState(now,it==saved.end()?nullptr:&it->second,kind==1?.25f:pin_scale.load());
+                auto state=desiredState(now,it==saved.end()?nullptr:&it->second,factor);
                 if(equal(now,state.last))continue;
                 saved[name]=state;
-                if(set(o,v,state.last))++writes;else ++failures;
+                if(set(o,v,state.last)){
+                    static_cast<void>(0);
+                    if(kind==4&&!refuel_logged){
+                        refuel_logged=true;
+                        
+                    }
+                }
             }
         }
     }
+    refueling_group::finish(guideSeen);
     for(auto it=saved.begin();it!=saved.end();){if(!seen.count(it->first)&&restore(it->first,it->second))it=saved.erase(it);else ++it;}
-
+    
 }
 }

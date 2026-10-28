@@ -1,7 +1,3 @@
-// Establish the current bomb widget/canvas draw scope and validate its camera
-// schema. This scope restricts the circle and line corrections to the intended
-// primitive; unrelated world projections must keep the native result.
-
 #pragma once
 #include <array>
 #include <atomic>
@@ -82,10 +78,10 @@ inline bool initialize(const UEVR_PluginInitializeParam* p){
     host=p;if(!p||!p->sdk||!p->vr||!p->vr->get_ui_width||!p->vr->get_ui_height||!p->callbacks||!p->callbacks->on_custom_event)return false;
     auto* sdk=p->sdk;if(!sdk->uobject||!sdk->uobject->is_a||!sdk->uobject_array||!sdk->ustruct||!sdk->fproperty||!sdk->functions||!sdk->callbacks)return false;
     auto module=GetModuleHandleW(nullptr);wchar_t path[32768]{};std::string hash;std::array<unsigned char,32> bytes{};
-    if(!module||!GetModuleFileNameW(module,path,32768)||!boundary::file_hash(path,hash)||hash!="51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F"||
+    if(!module||!GetModuleFileNameW(module,path,32768)||!boundary::cached_module_file_hash(module,path,hash)||hash!="51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F"||
        !read(reinterpret_cast<unsigned char*>(module)+drawRva,bytes)||bytes!=drawHead){return false;}
-    // Retain only the verified current-bomb draw scope. Matrix corrections
-    // belong to bomb_circle.h and are restored after its scoped draw.
+    // V65 retains the verified current-bomb draw scope but retires V64's
+    // unobserved stereo lens/pose corrections. Only bomb_circle.h writes now.
     const int id=p->functions->register_inline_hook(reinterpret_cast<unsigned char*>(module)+drawRva,reinterpret_cast<void*>(&wrapper),reinterpret_cast<void**>(&original));
     installed=id>=0&&original;if(!installed&&id>=0)p->functions->unregister_inline_hook(id);
     return installed;

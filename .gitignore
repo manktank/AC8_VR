@@ -48,3 +48,14 @@ cache/
 *.utoc
 *.ucas
 aes-key*
+
+# Current canonical runtime recovery/state (never ship fresh-install markers)
+data/*.backup.json
+data/AC8_VR-*Restore*.json
+data/AC8_VR-*Baseline*.json
+data/AC8_VR-*Cache*.json
+data/AC8_VR-HUDPresentationSetup.json
+data/AC8_VR-Ladder.json
+data/AC8_VR-GlowAudit.json
+!data/AC8_VR-*Controls.json
+!data/AC8_VR-TargetSettings.json

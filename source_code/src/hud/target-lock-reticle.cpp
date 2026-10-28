@@ -1,7 +1,4 @@
-// UEVR module entry for automatic seeker sizing. Supplies lifetime, naming
-// and bounded-read helpers to seeker-auto.h, then activates it on engine ticks.
-
-// Automatic target-lock reticle sizing.
+// Automatic version of the visually verified F11 seeker-size input hook.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
