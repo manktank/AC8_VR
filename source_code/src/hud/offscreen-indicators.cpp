@@ -7,6 +7,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <intrin.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -32,8 +33,8 @@ static const UEVR_PluginInitializeParam* host=nullptr;
 static Draw original=nullptr,originalForward=nullptr;
 static std::atomic<bool> enabled{true};
 static std::atomic<double> offsetX{0},offsetY{-950},scale{.5};
-static std::atomic<uint64_t> calls{0},eligible{0},shifted{0},pointsMoved{0},textMoved{0},rejected{0};
-static std::atomic<uint64_t> forwardCalls{0},forwardEligible{0},forwardScaled{0},forwardPoints{0},forwardTexts{0},forwardRejected{0};
+
+
 static bool attempted=false,installed=false;
 static std::atomic<bool> layoutVerified{false};
 static std::atomic<bool> fontLayoutVerified{false};
@@ -198,10 +199,14 @@ static bool shiftEmitted(UEVR_UObjectHandle canvas,const Before& before,Point de
        !gatherText(canvas,before.normal,0x1c8,0x1b8,delta,factor,texts,textCount) ||
        !gatherText(canvas,before.low,0x238,0x228,delta,factor,texts,textCount))return false;
     const int count=points.count-before.points;
+    if(count) {
+        SIZE_T copied=0;const auto size=static_cast<SIZE_T>(count)*sizeof(Point);
+        if(!ReadProcessMemory(GetCurrentProcess(),points.data+static_cast<size_t>(before.points)*sizeof(Point),moved.data(),size,&copied)||copied!=size)return false;
+    }
     Point minimum{50000,50000},maximum{-50000,-50000};
     for(int i=0;i<count;++i) {
-        Point value{};
-        if(!read(points.data+static_cast<size_t>(before.points+i)*16,value)||!shiftedPoint(value,{},moved[static_cast<size_t>(i)]))return false;
+        const Point value=moved[static_cast<size_t>(i)];
+        if(!shiftedPoint(value,{},moved[static_cast<size_t>(i)]))return false;
         minimum.x=std::min(minimum.x,value.x);minimum.y=std::min(minimum.y,value.y);
         maximum.x=std::max(maximum.x,value.x);maximum.y=std::max(maximum.y,value.y);
     }
@@ -240,12 +245,14 @@ static bool shiftEmitted(UEVR_UObjectHandle canvas,const Before& before,Point de
             enabled=false;reason="text setter readback failed; disabled until next test";return false;
         }
     }
-    if(forward){++forwardScaled;forwardPoints+=static_cast<uint64_t>(count);forwardTexts+=static_cast<uint64_t>(textCount);}
-    else{++shifted;pointsMoved+=static_cast<uint64_t>(count);textMoved+=static_cast<uint64_t>(textCount);}
+    if(forward){static_cast<void>(0);static_cast<void>(0);static_cast<void>(0);}
+    else{static_cast<void>(0);static_cast<void>(0);static_cast<void>(0);}
     return true;
 }
+template<size_t N> static bool codeMatches(const unsigned char* p,const unsigned char(&expected)[N]);
+#include "arrow-live-controls.h"
 static void wrapper(UEVR_UObjectHandle widget,UEVR_UObjectHandle canvas) {
-    ++calls;
+    static_cast<void>(0);
     const auto fn=original;if(!fn)return;
     Before before{};unsigned char mode=255;
     const bool active=enabled.load() && layoutVerified && widget && canvas &&
@@ -253,13 +260,13 @@ static void wrapper(UEVR_UObjectHandle widget,UEVR_UObjectHandle canvas) {
         read(bytes(widget)+0x618,mode) && mode==0 && snapshot(canvas,before);
     const Point delta{offsetX.load(),offsetY.load()};
     const double factor=fontLayoutVerified?scale.load():1;
-    fn(widget,canvas);
+    { live_controls::TargetScope scope(widget,canvas);fn(widget,canvas); }
     if(!active)return;
-    ++eligible;
-    if(!shiftEmitted(canvas,before,delta,factor))++rejected;
+    static_cast<void>(0);
+    if(!shiftEmitted(canvas,before,delta,factor))static_cast<void>(0);
 }
 static void forwardWrapper(UEVR_UObjectHandle widget,UEVR_UObjectHandle canvas) {
-    ++forwardCalls;const auto fn=originalForward;if(!fn)return;
+    static_cast<void>(0);const auto fn=originalForward;if(!fn)return;
     Before before{};unsigned char mode=255;
     const bool active=enabled.load() && layoutVerified && widget && canvas &&
         host->sdk->uobject->is_a(widget,locatorClass) && host->sdk->uobject->is_a(canvas,canvasClass) &&
@@ -267,18 +274,19 @@ static void forwardWrapper(UEVR_UObjectHandle widget,UEVR_UObjectHandle canvas) 
     const double factor=fontLayoutVerified?scale.load():1;
     fn(widget,canvas);
     if(!active || factor==1)return;
-    ++forwardEligible;
+    static_cast<void>(0);
     // The forward body's existing FowardLocatorOffset already places it.
     // Apply the shared scale only; never add the target's translation here.
-    if(!shiftEmitted(canvas,before,{},factor,true))++forwardRejected;
+    if(!shiftEmitted(canvas,before,{},factor,true))static_cast<void>(0);
 }
 template<size_t N> static bool codeMatches(const unsigned char* p,const unsigned char(&expected)[N]) {
     std::array<unsigned char,N> actual{};SIZE_T n=0;
     return ReadProcessMemory(GetCurrentProcess(),p,actual.data(),N,&n) && n==N && std::memcmp(actual.data(),expected,N)==0;
 }
+
 static void install() {
     attempted=true;wchar_t path[32768]{};std::string hash;auto module=GetModuleHandleW(nullptr);
-    if(!module || !GetModuleFileNameW(module,path,32768)||!boundary::file_hash(path,hash)||
+    if(!module || !GetModuleFileNameW(module,path,32768)||!boundary::cached_module_file_hash(module,path,hash)||
        hash!="51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F") {
         reason="game executable guard failed; no hook installed";return;
     }
@@ -296,9 +304,10 @@ static void install() {
         original=nullptr;originalForward=nullptr;
     }
     reason=installed?"both locator hooks installed; waiting for reflected layout validation":"paired hook registration failed; both removed";
+    if(installed)live_controls::initialize(base);
 }
 static void controls() {
-    std::error_code ec;const auto path=directory/L"ac8_target_arrow_shift_controls.json";
+    std::error_code ec;const auto path=directory/L"AC8_VR-TargetArrowShiftControls.json";
     const auto stamp=std::filesystem::last_write_time(path,ec);if(ec || stamp==controlsStamp)return;
     std::ifstream file(path);std::string text((std::istreambuf_iterator<char>(file)),{});bool on=false;Point delta{};double factor=1;
     if(parseControls(text,on,delta,factor)){enabled=on;offsetX=delta.x;offsetY=delta.y;scale=factor;controlsStamp=stamp;}
@@ -307,14 +316,14 @@ static void controls() {
 static void tick(UEVR_UGameEngineHandle,float) {
     ++ticks;
     if(directory.empty()){wchar_t p[32768]{};host->functions->get_persistent_dir(p,32768);directory=std::filesystem::path(p)/L"data";controls();}
-    if(!attempted)install();
+    if(!attempted){install();if(!installed)live_controls::state="baseline_unavailable";live_controls::notify();}
     if(installed && !layoutVerified && (ticks==1 || ticks%60==0)) {
         layoutVerified=bindLayout();if(layoutVerified)reason="target shift active; checking font schema for paired scale";
     }
     if(layoutVerified && !fontLayoutVerified && (ticks==1 || ticks%60==0)) {
         fontLayoutVerified=bindFontLayout();if(fontLayoutVerified)reason="target/forward locators share scale; separate positions preserved";
     }
-    if(ticks==1 || ticks%60==0){controls();}
+    // Base preferences load once above; restart the game to reload them.
 }
 } // namespace target_arrow
 extern "C"  void uevr_plugin_required_version(UEVR_PluginVersion* v) {
@@ -326,5 +335,7 @@ extern "C"  bool uevr_plugin_initialize(const UEVR_PluginInitializeParam* p) {
     const auto s=p->sdk;
     if(!s->uobject||!s->uobject_array||!s->fname||!s->ustruct||!s->ffield||!s->ffield_class||!s->fproperty||
        !s->fstructproperty||!s->uscriptstruct||!s->callbacks||!s->callbacks->on_post_engine_tick)return false;
-    target_arrow::host=p;return s->callbacks->on_post_engine_tick(target_arrow::tick);
+    target_arrow::host=p;
+    if(p->callbacks&&p->callbacks->on_custom_event)p->callbacks->on_custom_event(target_arrow::live_controls::event);
+    return s->callbacks->on_post_engine_tick(target_arrow::tick);
 }

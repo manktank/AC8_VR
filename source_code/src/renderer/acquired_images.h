@@ -113,7 +113,10 @@ public:
         auto it=chains_.find(chain);
         if(it==chains_.end()){mutation_enabled_=false;return std::nullopt;}
         auto& c=it->second;
-        if(!succeeded(result)){uncertain(c);return std::nullopt;} // Includes XR_TIMEOUT_EXPIRED.
+        // XR_TIMEOUT_EXPIRED leaves the acquired image queued but grants no
+        // waited-image lease. A later successful wait may recover normally.
+        if(result==1)return std::nullopt;
+        if(!succeeded(result)){uncertain(c);return std::nullopt;}
         if(!mutation_enabled_||c.uncertain||c.in_flight||
            std::any_of(c.fifo.begin(),c.fifo.end(),[](const Entry& e){return e.waited;})){
             uncertain(c);return std::nullopt;
@@ -238,5 +241,11 @@ public:
         s.pending=c.pending.has_value();s.uncertain=c.uncertain;s.in_flight=c.in_flight;return s;
     }
     bool mutation_enabled(){std::lock_guard<std::mutex> guard(mutex_);return mutation_enabled_;}
+    // Call only after xrDestroySession really succeeds. Runtime destruction
+    // invalidates every old acquisition; monotonically increasing generations
+    // and serials prevent an old session token matching a later reused handle.
+    void destroyed_session(){
+        std::lock_guard<std::mutex> guard(mutex_);chains_.clear();mutation_enabled_=true;frame_consumed_=false;
+    }
 };
 } // namespace acquired_images

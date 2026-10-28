@@ -1,7 +1,3 @@
-// Pure geometry for projecting the presentation window into each eye.
-// Keep calculations in the declared XR spaces; head pose and authored camera
-// pose are different inputs and must not be substituted for one another.
-
 #pragma once
 #include <algorithm>
 #include <cmath>

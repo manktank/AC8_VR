@@ -23,10 +23,10 @@ static void check(HRESULT hr){if(FAILED(hr))throw std::runtime_error("Native gen
 #include "original_root_4188.h"
 #include "native_chain_specs.h"
 struct Texture {ComPtr<ID3D12Resource> resource;D3D12_CPU_DESCRIPTOR_HANDLE rtv{};DXGI_FORMAT format=DXGI_FORMAT_R8G8B8A8_UNORM;};
-struct Stage {PassSpec spec{};ComPtr<ID3D12PipelineState> pso;ComPtr<ID3D12DescriptorHeap> srvs,samplers;ComPtr<ID3D12Resource> pixel,vertex;ID3D12RootSignature* root=nullptr;};
+struct Stage {PassSpec spec{};ComPtr<ID3D12PipelineState> pso;ComPtr<ID3D12DescriptorHeap> srvs,samplers;ComPtr<ID3D12Resource> pixel,vertex;ID3D12RootSignature* root=nullptr;UINT srvOffset=0,samplerOffset=0;};
 class Recorder {
     friend class FinalBlend;
-    ComPtr<ID3D12Device> device;ComPtr<ID3D12DescriptorHeap> rtvs;
+    ComPtr<ID3D12Device> device;ComPtr<ID3D12DescriptorHeap> rtvs,sharedSrvs,sharedSamplers;
     ComPtr<ID3D12RootSignature> r1033,r1022,r4188;
     ComPtr<ID3D12Resource> vb,view;
     std::map<int,Texture> textures;std::vector<Stage> stages;
@@ -66,6 +66,11 @@ public:
         for(const auto& spec:specs)texture(spec.target,static_cast<UINT>(spec.width),static_cast<UINT>(spec.height),DXGI_FORMAT_R8G8B8A8_UNORM);
         const float vertices[][6]={{0,0,0,1,0,0},{1,0,0,1,1,0},{0,1,0,1,0,1},{0,1,0,1,0,1},{1,0,0,1,1,0},{1,1,0,1,1,1}};
         vb=upload(vertices,sizeof(vertices));view=buffer(L"event-3347-View.bin");
+        hd={};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=static_cast<UINT>(std::size(specs))*64;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&sharedSrvs)));
+        hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;hd.NumDescriptors=static_cast<UINT>(std::size(specs))*32;
+        check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&sharedSamplers)));
+        const UINT samplerStride=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
         for(const auto& spec:specs){
             Stage stage{};stage.spec=spec;stage.root=spec.root==1033?r1033.Get():spec.root==1022?r1022.Get():r4188.Get();
             const auto vs=read(assets/(L"pso-"+std::to_wstring(spec.pso)+L"-VS.dxbc"));const auto ps=read(assets/(L"pso-"+std::to_wstring(spec.pso)+L"-PS.dxbc"));
@@ -78,11 +83,14 @@ public:
             pd.DepthStencilState.FrontFace=pd.DepthStencilState.BackFace={D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,D3D12_COMPARISON_FUNC_ALWAYS};
             for(auto& b:pd.BlendState.RenderTarget){b.SrcBlend=b.SrcBlendAlpha=D3D12_BLEND_ONE;b.DestBlend=b.DestBlendAlpha=D3D12_BLEND_ZERO;b.BlendOp=b.BlendOpAlpha=D3D12_BLEND_OP_ADD;b.LogicOp=D3D12_LOGIC_OP_CLEAR;b.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;}
             check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&stage.pso)));
-            hd={};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=64;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&stage.srvs)));
-            hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;hd.NumDescriptors=32;check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&stage.samplers)));
+            stage.srvs=sharedSrvs;stage.samplers=sharedSamplers;
+            stage.srvOffset=static_cast<UINT>(stages.size())*64;stage.samplerOffset=static_cast<UINT>(stages.size())*32;
+            // Populate the entire root-table range, including unused slots.
+            D3D12_SHADER_RESOURCE_VIEW_DESC nullView{};nullView.Format=DXGI_FORMAT_R8G8B8A8_UNORM;nullView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;nullView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;nullView.Texture2D.MipLevels=1;
+            for(UINT i=0;i<64;++i)d->CreateShaderResourceView(nullptr,&nullView,{sharedSrvs->GetCPUDescriptorHandleForHeapStart().ptr+(stage.srvOffset+i)*sr_stride});
             for(unsigned i=0;i<spec.source_count;++i){const auto& t=textures.at(spec.sources[i]);D3D12_SHADER_RESOURCE_VIEW_DESC sv{};sv.Format=t.format;sv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;sv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;sv.Texture2D.MipLevels=1;
-                D3D12_CPU_DESCRIPTOR_HANDLE h{stage.srvs->GetCPUDescriptorHandleForHeapStart().ptr+i*sr_stride};d->CreateShaderResourceView(t.resource.Get(),&sv,h);}
-            const auto sampler=native_sampler(spec.event);d->CreateSampler(&sampler,stage.samplers->GetCPUDescriptorHandleForHeapStart());
+                D3D12_CPU_DESCRIPTOR_HANDLE h{stage.srvs->GetCPUDescriptorHandleForHeapStart().ptr+(stage.srvOffset+i)*sr_stride};d->CreateShaderResourceView(t.resource.Get(),&sv,h);}
+            const auto sampler=native_sampler(spec.event);for(UINT i=0;i<32;++i)d->CreateSampler(&sampler,{stage.samplers->GetCPUDescriptorHandleForHeapStart().ptr+(stage.samplerOffset+i)*samplerStride});
             stage.pixel=buffer(L"-PS-root-parameters.bin",spec.event);if(spec.vertex_file)stage.vertex=buffer(L"-VS-constants.bin",spec.event);stages.push_back(std::move(stage));
         }
     }
@@ -93,12 +101,18 @@ public:
         if(sd.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||sd.Width!=2560||sd.Height!=1338||sd.DepthOrArraySize!=1||sd.MipLevels!=1||sd.SampleDesc.Count!=1||
             (sd.Format!=DXGI_FORMAT_B8G8R8A8_UNORM&&sd.Format!=DXGI_FORMAT_B8G8R8A8_TYPELESS&&sd.Format!=DXGI_FORMAT_B8G8R8A8_UNORM_SRGB))return false;
         ComPtr<ID3D12Device> source_device;if(FAILED(snapshot->GetDevice(IID_PPV_ARGS(&source_device)))||source_device.Get()!=device.Get())return false;
+        
+        {
         auto* input=textures.at(421).resource.Get();transition(list,input,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);list->CopyResource(input,snapshot);transition(list,input,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
         for(int id:{317,1088}){auto& t=textures.at(id);transition(list,t.resource.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);const float zero[4]{};list->ClearRenderTargetView(t.rtv,zero,0,nullptr);transition(list,t.resource.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);}
         const D3D12_VERTEX_BUFFER_VIEW vbv{vb->GetGPUVirtualAddress(),144,24};
+        
+        ID3D12DescriptorHeap* sharedHeaps[]={sharedSrvs.Get(),sharedSamplers.Get()};list->SetDescriptorHeaps(2,sharedHeaps);
+        const UINT samplerStride=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
         for(const auto& stage:stages){const auto& spec=stage.spec;auto& t=textures.at(spec.target);transition(list,t.resource.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
-            ID3D12DescriptorHeap* heaps[]={stage.srvs.Get(),stage.samplers.Get()};list->SetDescriptorHeaps(2,heaps);list->SetPipelineState(stage.pso.Get());list->SetGraphicsRootSignature(stage.root);
-            list->SetGraphicsRootDescriptorTable(0,stage.srvs->GetGPUDescriptorHandleForHeapStart());list->SetGraphicsRootDescriptorTable(1,stage.samplers->GetGPUDescriptorHandleForHeapStart());list->SetGraphicsRootConstantBufferView(2,stage.pixel->GetGPUVirtualAddress());
+            list->SetPipelineState(stage.pso.Get());list->SetGraphicsRootSignature(stage.root);
+            list->SetGraphicsRootDescriptorTable(0,{stage.srvs->GetGPUDescriptorHandleForHeapStart().ptr+stage.srvOffset*sr_stride});list->SetGraphicsRootDescriptorTable(1,{stage.samplers->GetGPUDescriptorHandleForHeapStart().ptr+stage.samplerOffset*samplerStride});list->SetGraphicsRootConstantBufferView(2,stage.pixel->GetGPUVirtualAddress());
             if(spec.root==1033)list->SetGraphicsRootConstantBufferView(3,view->GetGPUVirtualAddress());if(stage.vertex)list->SetGraphicsRootConstantBufferView(static_cast<UINT>(spec.vertex_index),stage.vertex->GetGPUVirtualAddress());
             const D3D12_VIEWPORT vp{0,0,static_cast<float>(spec.width),static_cast<float>(spec.height),0,1};const D3D12_RECT rect{0,0,spec.width,spec.height};list->RSSetViewports(1,&vp);list->RSSetScissorRects(1,&rect);list->OMSetRenderTargets(1,&t.rtv,FALSE,nullptr);
             list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);list->IASetVertexBuffers(0,1,&vbv);list->DrawInstanced(6,1,0,0);transition(list,t.resource.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);

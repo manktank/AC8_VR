@@ -1,22 +1,19 @@
 # Compatibility
 
-The accepted configuration uses Windows x64, DirectX 12, OpenXR and UEVR Native Stereo. Headset checks were performed on Quest 3; other combinations need confirmation.
+The development profile targets Windows x64, DirectX 12, OpenXR and UEVR Native Stereo. Headset testing was performed on Quest 3. Broader OpenXR connection support is implemented; that does not establish every headset/runtime combination as tested.
 
-The plugin uses public UEVR APIs and guarded private game/backend call sites. API-version compatibility alone is insufficient for every feature. Unsupported signatures leave the corresponding feature inactive; do not bypass those checks.
+## Glow connection
 
-## Verified binaries
+The portable `AC8_VR-OpenXRBridge.dll` and `AC8_VR-OpenXRLayer/AC8_VR-Glow.json` join the current loader chain through the public OpenXR negotiation interface. Bootstrap changes are process-local; they do not register a system-wide layer. The glow connection has no private UEVR SHA/RVA fallback.
 
-| Binary | SHA-256 |
-|---|---|
-| `UEVRBackend.dll` | `70CCBAAF4C357DEAACC3990FD01A911A029D31DCCF0E5ABC01C7A9073E4F50C1` |
-| `AceCombat8.exe` | `51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F` |
+When active OFXR recognizes the current instance, the glow adapter obtains its complete application-facing dispatch through public loader negotiation. This keeps OFXR's private frame/image operations outside the game's glow transaction. Current and legacy OFXR layer identities are supported without build-number or binary-offset checks; an incomplete dispatch is not mixed with another provider. OFXR is optional and its DLLs are not bundled.
 
-The backend's installation folder is irrelevant. A public download/version label for this exact UEVR build must be supplied with the release; these hashes identify it without exposing a local path. Do not assume newer upstream versions have matching private addresses. UEVR and game executables are not bundled.
+Connection tests passed with ordinary OpenXR and the actual OFXR V116 and v681 DLLs. Glow was accepted in game using OFXR; OFXR crash/stability investigation is deferred. This is not a claim that all future OFXR versions or their frame-generation modes have been validated.
 
-Maintainers can verify candidates with PowerShell `Get-FileHash -Algorithm SHA256` and their own local file path.
+## Remaining native boundaries
 
-## Rendering assumptions
+Other game-specific and camera/projection hooks still validate the supported game/backend signatures, PE metadata and reflected layouts. UEVR API-version compatibility alone is not sufficient for those hooks. Unsupported evidence leaves the affected enhancement inactive; retain the checks.
 
-The glow path expects the validated 2560 × 1338 HUD source and supported OpenXR layer/resource formats. It requires current-frame scene/cylinder geometry and acquired/waited image ownership. The authored pass chain has fixed intermediate dimensions. Changing these assumptions requires source validation.
+The renderer validates current scene/HUD geometry, surface formats and acquired/waited image ownership. The authored glow graph has fixed internal pass dimensions; the HUD input and current per-eye mapping are validated separately, not inferred from a display resolution or widget class name.
 
-Headset testing remains necessary after binary, shader or cleanup changes. Automated checks cover geometry, guards and simulated lifecycle behavior; they cannot establish final headset appearance.
+Automated validation covers 24 Lua suites, 128 optional-module combinations, 24 native fixtures, and actual OpenXR loader negotiation. These checks are distinct from headset appearance or performance measurements. The assembled fresh-install ZIP still needs a final headset launch before publication. No overall FPS improvement is claimed.

@@ -1,14 +1,10 @@
-// Temporarily supply flat-style text metrics during a target's native update.
-// The left label has its own correction. Nested scopes avoid repeated scaling;
-// original fields are restored and native introduction animation state is kept.
-
 #pragma once
 #include <array>
 #include <mutex>
 #include <cmath>
 #include <cstring>
 #include <fstream>
-// Box construction is native; the Lua post-tick writer owns persistent size.
+// V80 rolls box construction/update sizing back to the pre-V77 Lua writer.
 // Native update scopes retain only the accepted text metrics/left-label correction.
 // The introduction's initial geometry and animation state remain native.
 namespace world_target_layout {
@@ -61,7 +57,11 @@ struct Scope {
    !read(value,table)||table!=gameBase+0xca8eb78||
    !read(reinterpret_cast<unsigned char*>(value)+8,flags)||(flags&0x30)||
    reinterpret_cast<uintptr_t>(host->sdk->uobject->get_outer(value))!=c.level)return;
-  for(size_t i=0;i<fields.size();++i)if(!read(reinterpret_cast<unsigned char*>(value)+fields[i].offset,original[i]))return;
+  static_assert(sizeof(float)==4 && fields[0].offset==0x328 && fields[12].offset==0x358);
+  std::array<float,13> contiguous{};
+  if(!read(reinterpret_cast<unsigned char*>(value)+fields[0].offset,contiguous)||
+     !read(reinterpret_cast<unsigned char*>(value)+fields[13].offset,original[13]))return;
+  std::copy(contiguous.begin(),contiguous.end(),original.begin());
   std::array<float,14> wanted{};if(!calculate(original,c,wanted))return;
   actor=value;previous=scopedActor;scopedActor=value;
   for(size_t i=0;i<fields.size();++i)std::memcpy(reinterpret_cast<unsigned char*>(actor)+fields[i].offset,&wanted[i],sizeof(float));
@@ -116,12 +116,13 @@ inline bool initialize(const UEVR_PluginInitializeParam* p){
  constexpr std::array<unsigned char,32> updateHead{{0x4c,0x89,0x44,0x24,0x18,0x48,0x89,0x54,0x24,0x10,0x55,0x56,0x41,0x55,0x48,0x8d,0xac,0x24,0xd0,0xfa,0xff,0xff,0x48,0x81,0xec,0x30,0x06,0,0,0x48,0x83,0xb9}};
  constexpr std::array<unsigned char,32> placementHead{{0x48,0x83,0xec,0x48,0x48,0x8b,0x1,0xf,0x10,0x82,0xa0,0x1,0x0,0x0,0xf2,0xf,0x10,0xd,0xfa,0x54,0x2,0x6,0xf2,0xf,0x5e,0x88,0xe8,0x7,0x0,0x0,0x48,0x8b}};
  std::array<unsigned char,32> b{},d{};
- if(!module||!GetModuleFileNameW(module,filename,32768)||!boundary::file_hash(filename,hash)||hash!="51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F"||
+ if(!module||!GetModuleFileNameW(module,filename,32768)||!boundary::cached_module_file_hash(module,filename,hash)||hash!="51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F"||
   !schema()||!read(reinterpret_cast<void*>(gameBase+0x72802d0),b)||b!=updateHead||!read(reinterpret_cast<void*>(gameBase+0x7284990),d)||d!=placementHead)return false;
  const int second=p->functions->register_inline_hook(reinterpret_cast<void*>(gameBase+0x72802d0),reinterpret_cast<void*>(&updateWrapper),reinterpret_cast<void**>(&originalUpdate));
  const int third=p->functions->register_inline_hook(reinterpret_cast<void*>(gameBase+0x7284990),reinterpret_cast<void*>(&placementWrapper),reinterpret_cast<void**>(&originalPlacement));
  ready=second>=0&&third>=0&&originalUpdate&&originalPlacement&&p->callbacks->on_custom_event(control);
  if(!ready){if(second>=0)p->functions->unregister_inline_hook(second);if(third>=0)p->functions->unregister_inline_hook(third);originalSize=nullptr;originalUpdate=nullptr;originalPlacement=nullptr;}
+
  return ready;
 }
 #endif

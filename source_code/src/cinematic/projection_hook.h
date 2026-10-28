@@ -1,31 +1,31 @@
-// Apply an optional cinematic lens fit at the verified projection boundary.
-// UEVR precision and the active presentation mode gate the change. The bomb
-// helpers remain separately scoped and must not inherit cinematic lens state.
-
 #pragma once
 #include "lens_projection.h"
+#include "hangar_near_clip.h"
 #include "bomb_projection.h"
 #include "bomb_circle.h"
 namespace cinematic_projection {
 using Function=void*(*)(void*,void*,int);
 inline std::atomic<Function> original{nullptr};
 inline std::atomic<bool> installed{false},allowed{false};
-inline std::atomic<unsigned long long> writes{0};
+
 inline std::atomic<const char*> state{"not_observed"};
 inline std::mutex install_mutex;
 inline thread_local bool double_precision=false;
 inline void* wrapper(void* device,void* output,int index){
     const auto fn=original.load();if(!fn)return output;
     auto* result=fn(device,output,index);cinematic_lens::Fit fit{};
-    if(result==output&&result&&double_precision&&cinematic_camera::enabled&&cinema_mask::requested&&cinematic_lens::current(fit)){
+    if(result==output&&result&&double_precision){
         auto& matrix=*reinterpret_cast<UEVR_Matrix4x4d*>(result);
-        if(cinematic_lens::apply(matrix.m,fit))++writes;}
+        if(cinematic_camera::enabled&&cinematic_lens::expanded_fit(fit)&&cinematic_lens::apply_expanded(matrix.m,fit)){}
+        else if(cinematic_lens::apply_full_view(matrix.m)){}
+        else if(cinematic_camera::enabled&&cinema_mask::requested&&cinematic_lens::current(fit)&&cinematic_lens::apply(matrix.m,fit)){}
+        hangar_near_clip::apply(matrix.m,cinematic_camera::enabled&&cinema_mask::hangar_crop);}
     return result;
 }
 inline void verify(){
     wchar_t path[32768]{};std::string hash;
     const auto game=GetModuleHandleW(nullptr);
-    allowed=game&&GetModuleFileNameW(game,path,32768)&&boundary::file_hash(path,hash)&&hash=="51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F";
+    allowed=game&&GetModuleFileNameW(game,path,32768)&&boundary::cached_module_file_hash(game,path,hash)&&hash=="51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F";
     state=allowed?"waiting_stereo_vtable":"unsupported_game";
 }
 // Recorded live UEVR log: projection slot12, game RVA04BBF060, UE5 double ABI.
@@ -52,9 +52,12 @@ inline void early(UEVR_StereoRenderingDeviceHandle device,int,float,UEVR_Vector3
     installed=attach_guarded(device);state=installed?"projection_slot_installed":"projection_slot_mismatch";
 }
 inline void control(const char* name,const char* data){
+    hangar_near_clip::control(name,data);
     if(!name||!data)return;
     std::lock_guard<std::mutex> guard(cinematic_lens::mutex);
     if(std::strcmp(name,"AC8_CinematicLensMode")==0)cinematic_lens::requested=std::strcmp(data,"on")==0;
+    if(std::strcmp(name,"AC8_CinematicLensFullView")==0)cinematic_lens::full_view=std::strcmp(data,"on")==0;
+    if(std::strcmp(name,"AC8_CinematicExpanded")==0){cinematic_lens::expanded=std::strcmp(data,"on")==0;cinematic_lens::view={};}
     if(std::strcmp(name,"AC8_CinematicLens")==0){char* end=nullptr;const double fov=std::strtod(data,&end);
         if(end&&*end=='|'){const double aspect=std::strtod(end+1,nullptr);if(std::isfinite(fov+aspect)&&fov>=.25&&fov<=170&&aspect>=.5&&aspect<=5)cinematic_lens::lens={fov,aspect};}}
 }

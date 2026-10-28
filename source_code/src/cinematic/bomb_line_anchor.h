@@ -1,7 +1,3 @@
-// Bridge painted velocity-icon coordinates into the native bomb draw. Packets
-// include widget/canvas identities and a freshness time; never reuse an anchor
-// from a previous HUD or accumulate an offset over the previous output.
-
 #pragma once
 #include <mutex>
 // A native dynamic-draw primitive cannot be reparented as a UMG child. Attach

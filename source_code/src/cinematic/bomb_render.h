@@ -1,7 +1,3 @@
-// Connect verified projection/map call sites to the bomb attachment helpers.
-// The game remains responsible for ballistics, predicted impact and styling.
-// Caller signatures and the current draw scope gate each adjustment.
-
 #pragma once
 #include <intrin.h>
 #include "bomb_projection.h"

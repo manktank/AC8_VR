@@ -13,6 +13,9 @@
 #include <unordered_set>
 #include <fstream>
 #include <intrin.h>
+#include <cstdio>
+#include <sstream>
+
 namespace hud_renderer {
 using Microsoft::WRL::ComPtr;
 const UEVR_PluginInitializeParam* api=nullptr;
@@ -25,21 +28,34 @@ ComPtr<ID3D12Device> device;
 std::recursive_mutex mutex;
 std::unordered_set<ID3D12CommandList*> recorded,known_direct_lists;
 std::filesystem::path assets_path;
-uint64_t fence_value=0,writes=0,rejects=0,scene_writes=0,scene_consumer=0,generation_frame=0,generation_fence=0;
-uint64_t observed_copies=0,held_images=0,frame_callbacks=0;
-uint64_t skipped_busy=0,skipped_generation=0,skipped_geometry=0,skipped_pair=0,skipped_layers=0,skipped_record=0;
-uint32_t last_layer_count=0;
-std::array<int32_t,16> last_layer_types{};
+
+
+
+
+
+
+
+uint64_t fence_value=0,scene_consumer=0,generation_frame=0,generation_fence=0;
 std::atomic<bool> active{false},overlay{false};
 std::atomic<bool> refresh_pending{false};
 std::atomic<bool> flight_allowed{false};
+std::atomic<bool> cover_active{false};
 std::atomic<const char*> refresh_reason{"glow_activation"};
 bool failed=false,bridge_installed=false,late_session_recovered=false;
 bool glow_requested=true;
+bool try_portable_bridge();
+
 bool startup_reset_pending=false;
-uint64_t device_resets=0,startup_reset_recoveries=0;
+bool reset_pending=false;
+ULONGLONG next_resource_retry=0;
+uint64_t next_bridge_retry=0;
+std::atomic<bool> brightness_report_requested{true};
+bool reported_brightness=false;
+const char* reported_state="";
 const char* failure_reason="none";
-const char* state="waiting_for_f9";
+const char* state="waiting_for_flight";
+
+
 thread_local bool nested=false;
 struct NestedScope {bool saved;NestedScope():saved(nested){nested=true;}~NestedScope(){nested=saved;}};
 struct CopyRecord {
@@ -63,16 +79,43 @@ ID3D12Resource* safe_ui(){
 void stop(const char* reason){active=false;if(renderer)renderer->policy({});state=reason;
     if(failed&&std::strcmp(reason,"left_flight_off")&&std::strcmp(reason,"manual_off"))failure_reason=reason;
     }
-bool enabled(){return active&&!failed;}
+bool enabled(){return active&&!failed&&!cover_active;}
 hud_policy::PacketCache policy_packets;
 void lifecycle(const char* event,const char* data){
+    
+
+
+    // Loading owns the black surround even if an old flight HUD survives.
+    // The control already exists; no new poll, render pass or shader is needed.
+    if(event&&data&&!std::strcmp(event,"AC8_TransitionCover")){
+        float opacity=0;unsigned loading=0;
+        if(sscanf_s(data,"%f|%u",&opacity,&loading)!=2||!std::isfinite(opacity)||opacity<0||opacity>1||loading>1)return;
+        const bool covered=opacity>0;
+        std::lock_guard<std::recursive_mutex> guard(mutex);
+        const bool previous=cover_active.exchange(covered);
+        if(previous!=covered){
+            copies.clear();generation_frame=generation_fence=0;
+            if(covered)stop("loading_cover_off");
+            else if(flight_allowed&&glow_requested&&!failed&&!reset_pending){active=true;refresh_reason="cover_released";refresh_pending=true;state="waiting_current_scene_pair";}
+        }
+        return;
+    }
+
+
+    if(event&&!std::strcmp(event,"AC8_GlowFixQuery")){brightness_report_requested=true;return;}
     if(event&&data&&!std::strcmp(event,"AC8_HUD_PolicyV50")){std::lock_guard<std::recursive_mutex> guard(mutex);const auto policy=policy_packets.update(data,GetTickCount64());if(renderer)renderer->policy(policy);return;}
     if(!event||!data||std::strcmp(event,"AC8_HUD_GlowLifecycle"))return;
     std::lock_guard<std::recursive_mutex> guard(mutex);
+    if(!std::strcmp(data,"toggle")){
+        glow_requested=!glow_requested;
+        if(!glow_requested)stop("manual_off");
+        else if(flight_allowed&&!failed&&!reset_pending){active=true;copies.clear();generation_frame=generation_fence=0;refresh_reason="manual_on";refresh_pending=true;state="waiting_current_scene_pair";}
+        return;
+    }
     if(!std::strcmp(data,"mission_entry")||!std::strcmp(data,"flight")){
         if(!std::strcmp(data,"mission_entry")){glow_requested=true;overlay=false;}
         else flight_allowed=true;
-        if(!flight_allowed||!glow_requested||failed)return;
+        if(!flight_allowed||!glow_requested||failed||reset_pending)return;
         active=true;copies.clear();generation_frame=generation_fence=0;
         refresh_reason="glow_activation";refresh_pending=true;
         state="waiting_current_scene_pair";return;
@@ -91,8 +134,21 @@ void lifecycle(const char* event,const char* data){
 }
 
 void engine_tick(UEVR_UGameEngineHandle,float){
+    static_cast<void>(0);
+    // F9 is owned by the native renderer. Send its actual requested flight state
+    // on the game thread so Lua can pair reversible widget opacity with glow.
+    // Ordinary resource resets retain the comparison choice; menus/fatal errors
+    // restore the user's source appearance. Never invoke Lua under our lock.
+    bool brightness=false;
+    {std::lock_guard<std::recursive_mutex> guard(mutex);brightness=flight_allowed&&glow_requested&&!failed;}
+    if(brightness_report_requested.exchange(false)||reported_brightness!=brightness){
+        reported_brightness=brightness;
+        if(api->functions->dispatch_lua_event)
+            api->functions->dispatch_lua_event("AC8_GlowFixBrightness",brightness?"on":"off");
+    }
     if(refresh_pending.exchange(false)&&api->functions->dispatch_lua_event)
         api->functions->dispatch_lua_event("AC8_HUD_Refresh",refresh_reason.load());
+
 }
 // Bridge observation occurs BEFORE the plugin lock. XR callbacks lock in the
 // opposite direction (bridge -> plugin), so never call observed_image under it.
@@ -102,16 +158,21 @@ void observe_copy(ID3D12GraphicsCommandList* list,ID3D12Resource* dst,ID3D12Reso
     std::lock_guard<std::recursive_mutex> lock(mutex);
     if(!enabled()||!renderer||dst==src)return;
 
-    std::wstring name;if(!known_direct_lists.count(list)||!destination::isolated_list(list,name)){++rejects;return;}
+    std::wstring name;if(!known_direct_lists.count(list)){static_cast<void>(0);return;}
+    if(!destination::isolated_list(list,name)){
+        static_cast<void>(0);
+        return;
+    }
     bool generated=false;
     if(full&&src==ui.Get()){
         if(recorded.size()>=64&&!recorded.count(list)){stop("recording_capacity_off");return;}
         // No change to the host's sharp source. Scene mode only runs generation.
-        nested=true;try{generated=renderer->record(list,dst,src,overlay);if(generated){recorded.insert(list);++writes;state=overlay?"black_overlay_comparison_active":"waiting_current_scene_pair";}else ++rejects;}
+        nested=true;try{generated=renderer->record(list,dst,src,overlay);if(generated){recorded.insert(list);static_cast<void>(0);state=overlay?"black_overlay_comparison_active":"waiting_current_scene_pair";}}
         catch(...){failed=true;stop("record_failed_off");}nested=false;
     }
-    if(overlay||!observed||binding.device.Get()!=device.Get()||!hud_route_scene::Renderer::supported(dst))return;
-    ++observed_copies;
+    if(overlay||!observed||binding.device.Get()!=device.Get())return;
+    if(!hud_route_scene::Renderer::supported(dst)){return;}
+    
     // Every recognized scene copy must precede its final observed RT barrier.
     // Current tokens pin the actual acquired image; reset records are discarded.
     copies.erase(std::remove_if(copies.begin(),copies.end(),[&](const CopyRecord& r){return r.frame!=frame;}),copies.end());
@@ -119,12 +180,12 @@ void observe_copy(ID3D12GraphicsCommandList* list,ID3D12Resource* dst,ID3D12Reso
     copies.push_back({token,dst,list,frame,0,D3D12_RESOURCE_STATE_COPY_DEST,area,full&&src==ui.Get(),generated,true});
 }
 void STDMETHODCALLTYPE copy(ID3D12GraphicsCommandList* list,ID3D12Resource* dst,ID3D12Resource* src){
-    original_copy(list,dst,src);if(nested||!dst||!src)return;
+    original_copy(list,dst,src);if(nested||!dst||!src||!active.load())return;
     const auto d=dst->GetDesc();if(d.Width>LONG_MAX||d.Height>LONG_MAX)return;
     observe_copy(list,dst,src,{0,0,static_cast<LONG>(d.Width),static_cast<LONG>(d.Height)},true);
 }
 void STDMETHODCALLTYPE region(ID3D12GraphicsCommandList* list,const D3D12_TEXTURE_COPY_LOCATION* dst,UINT x,UINT y,UINT z,const D3D12_TEXTURE_COPY_LOCATION* src,const D3D12_BOX* box){
-    original_region(list,dst,x,y,z,src,box);if(nested||!dst||!src||!dst->pResource||!src->pResource||z||dst->Type!=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX||src->Type!=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX||dst->SubresourceIndex||src->SubresourceIndex)return;
+    original_region(list,dst,x,y,z,src,box);if(nested||!active.load()||!dst||!src||!dst->pResource||!src->pResource||z||dst->Type!=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX||src->Type!=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX||dst->SubresourceIndex||src->SubresourceIndex)return;
     const auto s=src->pResource->GetDesc(),d=dst->pResource->GetDesc();
     const UINT64 w=box?box->right-box->left:s.Width;const UINT64 h=box?box->bottom-box->top:s.Height;
     if(!w||!h||uint64_t(x)+w>d.Width||uint64_t(y)+h>d.Height||uint64_t(x)+w>LONG_MAX||uint64_t(y)+h>LONG_MAX||(box&&(box->front||box->back!=1)))return;
@@ -150,92 +211,166 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue* queue,UINT count,ID3D12Comman
     original_execute(queue,count,lists);
     if(uses){const auto next=fence_value+1;const bool signaled=checked&&SUCCEEDED(queue->Signal(fence.Get(),next));
         for(UINT i=0;i<count&&lists;++i){recorded.erase(lists[i]);for(auto& r:copies)if(!r.ticket&&r.list==lists[i]){if(queue!=api->renderer->command_queue)r.valid=false;if(signaled){r.ticket=next;if(r.generated){generation_frame=r.frame;generation_fence=next;}}else r.valid=false;}}
+        for(UINT i=0;i<count&&lists;++i)static_cast<void>(0);
         if(signaled)fence_value=next;else{failed=true;stop("queue_signal_failed_off");}
     }
 }
 HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* list,ID3D12CommandAllocator* allocator,ID3D12PipelineState* pipeline){
-    const auto result=original_reset(list,allocator,pipeline);if(SUCCEEDED(result)&&!nested){std::lock_guard<std::recursive_mutex> lock(mutex);recorded.erase(list);copies.erase(std::remove_if(copies.begin(),copies.end(),[&](const CopyRecord& r){return !r.ticket&&r.list==list;}),copies.end());}return result;
+    const auto result=original_reset(list,allocator,pipeline);if(SUCCEEDED(result)&&!nested){static_cast<void>(0);std::lock_guard<std::recursive_mutex> lock(mutex);recorded.erase(list);copies.erase(std::remove_if(copies.begin(),copies.end(),[&](const CopyRecord& r){return !r.ticket&&r.list==list;}),copies.end());}return result;
 }
 
 
 bool can_hold(const acquired_images::Token& token,uint64_t frame,void*){
     std::lock_guard<std::recursive_mutex> lock(mutex);if(!enabled()||overlay)return false;
-    for(const auto& r:copies)if(r.frame==frame&&r.token==token&&r.ticket&&r.valid&&r.final_state==D3D12_RESOURCE_STATE_RENDER_TARGET){++held_images;return true;}return false;
+    for(const auto& r:copies)if(r.frame==frame&&r.token==token&&r.ticket&&r.valid&&r.final_state==D3D12_RESOURCE_STATE_RENDER_TARGET){return true;}return false;
 }
 bool coverage(const acquired_images::Token& token,uint64_t frame,const xr_read::Rect& rect,bool require_hud){
-    // Verify the union of submitted copy rectangles, including split eye copies.
-    std::vector<LONG> xs{rect.offset.x,rect.offset.x+rect.extent.width},ys{rect.offset.y,rect.offset.y+rect.extent.height};std::vector<D3D12_RECT> areas;
+    // Capacity matches observation's existing 64-copy gate. Validate every
+    // matching record before taking the full-rectangle fast path.
+    std::array<LONG,130> xs{},ys{};std::array<D3D12_RECT,64> areas{};
+    size_t nx=2,ny=2,na=0;bool full=false;
+    const LONG left=rect.offset.x,top=rect.offset.y,right=rect.offset.x+rect.extent.width,bottom=rect.offset.y+rect.extent.height;
+    xs[0]=left;xs[1]=right;ys[0]=top;ys[1]=bottom;
     for(const auto& r:copies)if(r.token==token&&r.frame==frame){
         if(!r.valid||!r.ticket||r.final_state!=D3D12_RESOURCE_STATE_RENDER_TARGET)return false;
-        if(require_hud&&!r.hud)continue;auto a=r.area;a.left=std::max(a.left,LONG(rect.offset.x));a.top=std::max(a.top,LONG(rect.offset.y));a.right=std::min(a.right,LONG(rect.offset.x+rect.extent.width));a.bottom=std::min(a.bottom,LONG(rect.offset.y+rect.extent.height));
-        if(a.left<a.right&&a.top<a.bottom){areas.push_back(a);xs.push_back(a.left);xs.push_back(a.right);ys.push_back(a.top);ys.push_back(a.bottom);}
+        if(require_hud&&!r.hud)continue;
+        auto a=r.area;a.left=std::max(a.left,left);a.top=std::max(a.top,top);a.right=std::min(a.right,right);a.bottom=std::min(a.bottom,bottom);
+        if(a.left<a.right&&a.top<a.bottom){
+            if(na==areas.size())return false;
+            areas[na++]=a;xs[nx++]=a.left;xs[nx++]=a.right;ys[ny++]=a.top;ys[ny++]=a.bottom;
+            full=full||(a.left==left&&a.top==top&&a.right==right&&a.bottom==bottom);
+        }
     }
-    std::sort(xs.begin(),xs.end());std::sort(ys.begin(),ys.end());
-    for(size_t x=1;x<xs.size();++x)for(size_t y=1;y<ys.size();++y){if(xs[x]==xs[x-1]||ys[y]==ys[y-1])continue;bool found=false;for(const auto& a:areas)if(a.left<=xs[x-1]&&a.right>=xs[x]&&a.top<=ys[y-1]&&a.bottom>=ys[y]){found=true;break;}if(!found)return false;}
-    return !areas.empty();
+    if(full)return true;
+    std::sort(xs.begin(),xs.begin()+nx);std::sort(ys.begin(),ys.begin()+ny);
+    nx=static_cast<size_t>(std::unique(xs.begin(),xs.begin()+nx)-xs.begin());
+    ny=static_cast<size_t>(std::unique(ys.begin(),ys.begin()+ny)-ys.begin());
+    for(size_t x=1;x<nx;++x)for(size_t y=1;y<ny;++y){
+        bool found=false;for(size_t i=0;i<na;++i){const auto& a=areas[i];if(a.left<=xs[x-1]&&a.right>=xs[x]&&a.top<=ys[y-1]&&a.bottom>=ys[y]){found=true;break;}}
+        if(!found)return false;
+    }
+    return na!=0;
+}
+bool ensure_scene_resources(ID3D12Resource* scene){
+    if(scene_renderer&&scene_renderer->compatible(scene))return true;
+    if(fence->GetCompletedValue()<scene_consumer){state="waiting_for_scene_resize_fence";return false;}
+    if(GetTickCount64()<next_resource_retry)return false;
+    auto replacement=std::make_unique<hud_route_scene::Renderer>(device.Get(),assets_path,*renderer,scene);
+    scene_renderer=std::move(replacement);
+    return true;
 }
 openxr_handoff::FrameOutcome frame_sink(openxr_handoff::Session session,const xr_read::EndInfo* info,const openxr_handoff::Held* held,size_t count,uint64_t frame,ID3D12Device* actual_device,ID3D12CommandQueue* queue,void*){
     using Outcome=openxr_handoff::FrameOutcome;std::lock_guard<std::recursive_mutex> lock(mutex);
-    ++frame_callbacks;
+    
     if(!enabled()||overlay||actual_device!=device.Get()||!queue)return Outcome::unchanged;
-    last_layer_count=info?info->layerCount:0;last_layer_types.fill(0);
-    if(info&&info->layers)for(unsigned i=0;i<(std::min)(last_layer_count,16u);++i)last_layer_types[i]=info->layers[i]?info->layers[i]->type:0;
-    if(!hud_submission_layout::supported(info)){state="unsupported_layer_layout_skipped";++rejects;++skipped_layers;return Outcome::unchanged;}
+    if(!hud_submission_layout::supported(info)){state="unsupported_layer_layout_skipped";static_cast<void>(0);return Outcome::unchanged;}
     const openxr_handoff::Held *hud=nullptr,*scene=nullptr;
     for(size_t i=0;i<count;++i){bool is_hud=false;for(const auto& r:copies)if(r.token==held[i].token&&r.frame==frame&&r.hud)is_hud=true;
-        if(is_hud){current_geometry::Snapshot candidate{};for(size_t j=0;j<count;++j)if(i!=j&&current_geometry::read_layers(info,held[j].token.chain,held[i].token.chain,&candidate)){if(hud||scene){state="ambiguous_layers_skipped";++rejects;return Outcome::unchanged;}hud=&held[i];scene=&held[j];}}
+        if(is_hud){current_geometry::Snapshot candidate{};for(size_t j=0;j<count;++j)if(i!=j&&current_geometry::read_layers(info,held[j].token.chain,held[i].token.chain,&candidate)){if(hud||scene){state="ambiguous_layers_skipped";static_cast<void>(0);return Outcome::unchanged;}hud=&held[i];scene=&held[j];}}
     }
-    if(!hud||!scene){state="waiting_current_scene_pair";++skipped_pair;return Outcome::unchanged;}
-    if(!hud_submission_layout::independent_quads(info,scene->token.chain,hud->token.chain)){state="shared_auxiliary_texture_skipped";++rejects;++skipped_layers;return Outcome::unchanged;}
-    if(generation_frame!=frame||!generation_fence||!recorded.empty()||!bridge.pending_exact(hud->token)||!bridge.pending_exact(scene->token)){state="current_generation_gate_skipped";++rejects;++skipped_generation;return Outcome::unchanged;}
+    if(!hud||!scene){state="waiting_current_scene_pair";return Outcome::unchanged;}
+    if(!hud_submission_layout::independent_quads(info,scene->token.chain,hud->token.chain)){state="shared_auxiliary_texture_skipped";static_cast<void>(0);return Outcome::unchanged;}
+    if(generation_frame!=frame||!generation_fence||!recorded.empty()||!bridge.pending_exact(hud->token)||!bridge.pending_exact(scene->token)){state="current_generation_gate_skipped";static_cast<void>(0);return Outcome::unchanged;}
     const auto sd=scene->resource->GetDesc(),hd=hud->resource->GetDesc();
     current_geometry::Request request{};request.frame=frame;request.layout=1;request.scene_chain=scene->token.chain;request.hud_chain=hud->token.chain;request.scene_width=static_cast<uint32_t>(sd.Width);request.scene_height=sd.Height;request.hud_width=static_cast<uint32_t>(hd.Width);request.hud_height=hd.Height;
-    current_geometry::Snapshot raw{},geometry{};if(!current_geometry::read_layers(info,request.scene_chain,request.hud_chain,&raw)){++rejects;return Outcome::unchanged;}
+    current_geometry::Snapshot raw{},geometry{};if(!current_geometry::read_layers(info,request.scene_chain,request.hud_chain,&raw)){static_cast<void>(0);return Outcome::unchanged;}
     // These are presentation-local poses from THIS call, not a claim about the
     // earlier engine frame-selection hook. Both layers must share actual space.
     request.selected.valid=true;request.selected.session=reinterpret_cast<uint64_t>(session);request.selected.space=raw.space;request.selected.frame=static_cast<uint32_t>(frame);
     for(unsigned i=0;i<2;++i){request.selected.poses[i]=raw.eyes[i].pose;request.selected.fovs[i]=raw.eyes[i].fov;}
-    if(!current_geometry::read(session,info,request,geometry)||geometry.cylinder.layerFlags!=2||!coverage(hud->token,frame,geometry.cylinder.subImage.imageRect,true)||!coverage(scene->token,frame,geometry.eyes[0].subImage.imageRect,false)||!coverage(scene->token,frame,geometry.eyes[1].subImage.imageRect,false)){
-        state="geometry_state_or_copy_coverage_skipped";++rejects;++skipped_geometry;return Outcome::unchanged;}
+    const bool geometry_ok=current_geometry::read(session,info,request,geometry);
+    const auto last_hud_flags=geometry_ok?current_geometry::hud_flags(geometry):0;
+    const bool flags_ok=geometry_ok&&(last_hud_flags&2)&&!(last_hud_flags&~uint64_t(3));
+    const bool hud_covered=geometry_ok&&coverage(hud->token,frame,current_geometry::hud_image(geometry).imageRect,true);
+    const bool scene_covered=geometry_ok&&coverage(scene->token,frame,geometry.eyes[0].subImage.imageRect,false)&&coverage(scene->token,frame,geometry.eyes[1].subImage.imageRect,false);
+    if(!geometry_ok||!flags_ok||!hud_covered||!scene_covered){
+        state="geometry_state_or_copy_coverage_skipped";static_cast<void>(0);return Outcome::unchanged;}
     if(fence->GetCompletedValue()==UINT64_MAX){failed=true;stop("device_removed_off");return Outcome::unchanged;}
     bool recorded_scene=false;
-    try{if(!scene_renderer)scene_renderer=std::make_unique<hud_route_scene::Renderer>(device.Get(),assets_path,*renderer,scene->resource.Get());recorded_scene=scene_renderer->record(*renderer,scene->resource.Get(),hud->resource.Get(),geometry,fence.Get());}
-    catch(...){failed=true;stop("scene_record_failed_off");}nested=false;
-    if(!recorded_scene){if(scene_renderer&&scene_renderer->busy()){++skipped_busy;state="scene_consumer_busy_skipped";}else{++skipped_record;++rejects;}return Outcome::unchanged;}
+    try{
+        if(!ensure_scene_resources(scene->resource.Get()))return Outcome::unchanged;
+        recorded_scene=scene_renderer->record(*renderer,scene->resource.Get(),hud->resource.Get(),geometry,fence.Get());
+    }catch(const std::exception& e){
+        next_resource_retry=GetTickCount64()+2000;state="retrying_scene_resources";
+        if(api->functions->log_error)api->functions->log_error("[AC8 GlowFix 2] Scene resources will retry: %s",e.what());
+    }nested=false;
+    if(!recorded_scene){if(scene_renderer&&scene_renderer->busy()){state="scene_consumer_busy_skipped";}else{static_cast<void>(0);}return Outcome::unchanged;}
     if(FAILED(queue->Wait(fence.Get(),fence_value))){failed=true;stop("scene_queue_wait_failed_off");return Outcome::unchanged;}
-    auto* commands=scene_renderer->commands();nested=true;original_execute(queue,1,&commands);nested=false;
-    const auto next=fence_value+1;if(FAILED(queue->Signal(fence.Get(),next))){failed=true;stop("scene_queue_signal_failed_off");return Outcome::fatal;}
+    auto* commands=scene_renderer->commands();static_cast<void>(0);nested=true;original_execute(queue,1,&commands);nested=false;
+    const auto next=fence_value+1;if(FAILED(queue->Signal(fence.Get(),next))){static_cast<void>(0);failed=true;stop("scene_queue_signal_failed_off");return Outcome::fatal;}
+    static_cast<void>(0);
     fence_value=next;scene_consumer=next;scene_renderer->submitted(next);
-    ++scene_writes;state="native_scene_per_eye_active";return Outcome::submitted;
+    static_cast<void>(0);state="native_scene_per_eye_active";return Outcome::submitted;
 }
-bool startup_reset_can_resume(bool same_device,bool healthy,bool direct_queue){
-    return failed&&startup_reset_pending&&!writes&&!scene_writes&&!fence_value&&same_device&&healthy&&direct_queue;
-}
-void recover_startup_reset(){
-    if(!startup_reset_pending||!api||!api->renderer||!device||!fence)return;
-    auto* queue=static_cast<ID3D12CommandQueue*>(api->renderer->command_queue);
-    ComPtr<ID3D12Device> actual;
-    const bool same=queue&&api->renderer->device==device.Get()&&
-        SUCCEEDED(queue->GetDevice(IID_PPV_ARGS(&actual)))&&actual.Get()==device.Get();
-    if(!startup_reset_can_resume(same,device->GetDeviceRemovedReason()==S_OK,
-          queue&&queue->GetDesc().Type==D3D12_COMMAND_LIST_TYPE_DIRECT)||fence->GetCompletedValue()!=0)return;
-    // No glow command has been submitted. A same-device backbuffer resize can
-    // retain the initialized shader resources; real device/GPU failures stay off.
-    startup_reset_pending=false;failed=false;failure_reason="none";++startup_reset_recoveries;
-    copies.clear();recorded.clear();generation_frame=generation_fence=0;
-    active=flight_allowed&&glow_requested;
-    if(active){refresh_reason="glow_activation";refresh_pending=true;}
-    state=active?"waiting_current_scene_pair":"waiting_for_flight";
+// Normal resolution/fullscreen resets pause generation, retain resources and
+// automatically resume after the actual submitted fence completes. Never free
+// textures referenced by an unsubmitted host command list or reuse old copies.
+bool reset_can_resume(bool same_device,bool healthy,bool direct_queue,uint64_t completed){
+    return reset_pending&&!failed&&same_device&&healthy&&direct_queue&&recorded.empty()&&
+        completed!=UINT64_MAX&&completed>=fence_value;
 }
 void present(){
+    if(!bridge_installed&&!failed)try_portable_bridge();
     std::lock_guard<std::recursive_mutex> lock(mutex);ui=safe_ui();
-    recover_startup_reset();
-
+    if(failed||!api||!renderer||!fence)return;
+    const auto* current_device=static_cast<ID3D12Device*>(api->renderer->device);
+    auto* queue=static_cast<ID3D12CommandQueue*>(api->renderer->command_queue);
+    ComPtr<ID3D12Device> actual;
+    if(!queue||current_device!=device.Get()||FAILED(queue->GetDevice(IID_PPV_ARGS(&actual)))||actual.Get()!=device.Get()){
+        state="waiting_for_original_device";return;
+    }
+    const auto completed=fence->GetCompletedValue();
+    if(completed==UINT64_MAX||device->GetDeviceRemovedReason()!=S_OK){failed=true;stop("device_removed_off");return;}
+    if(reset_pending&&!reset_can_resume(true,true,queue->GetDesc().Type==D3D12_COMMAND_LIST_TYPE_DIRECT,completed)){
+        state="waiting_for_reset_fence";return;
+    }
+    if(!ui){state="waiting_for_hud_texture";return;}
+    const auto wanted=ui->GetDesc(),current=renderer->input(0)->GetDesc();
+    if(!surface_formats::texture(wanted)){state="unsupported_hud_surface";return;}
+    const bool change=!surface_formats::compatible(wanted,current);
+    if(!reset_pending&&!change)return;
+    if(!recorded.empty()||completed<fence_value){state="waiting_for_resize_fence";return;}
+    if(GetTickCount64()<next_resource_retry)return;
+    try{
+        // Keep the old graph alive until the replacement is fully constructed.
+        auto replacement=std::make_unique<hud_route_glow::Renderer>(device.Get(),assets_path,
+            static_cast<UINT>(wanted.Width),wanted.Height,wanted.Format);
+        scene_renderer.reset();renderer=std::move(replacement);
+        copies.clear();known_direct_lists.clear();generation_frame=generation_fence=scene_consumer=0;
+        reset_pending=startup_reset_pending=false;active=flight_allowed&&glow_requested;
+        failure_reason="none";
+        refresh_reason=change?"hud_size_changed":"device_reset_recovered";refresh_pending=true;
+        state=active?"waiting_current_scene_pair":"waiting_for_flight";
+    }catch(const std::exception& e){
+        next_resource_retry=GetTickCount64()+2000;state="retrying_hud_resources";
+        if(api->functions->log_error)api->functions->log_error("[AC8 GlowFix 2] HUD resources will retry: %s",e.what());
+    }
 }
-void device_reset(){std::lock_guard<std::recursive_mutex> lock(mutex);++device_resets;
-    
-    startup_reset_pending=(!failed||startup_reset_pending)&&!writes&&!scene_writes&&!fence_value;
-    failed=true;copies.clear();generation_frame=generation_fence=0;stop("device_reset_off");}
+void device_reset(){
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if(failed)return;
+    reset_pending=startup_reset_pending=true;active=false;
+    copies.clear();generation_frame=generation_fence=0;policy_packets=hud_policy::PacketCache{};
+    state="waiting_for_reset_fence";
+}
+bool try_portable_bridge(){
+    const auto now=GetTickCount64();if(bridge_installed||failed||now<next_bridge_retry)return bridge_installed;
+    next_bridge_retry=now+1000;
+    const bool connected=bridge.attach(api,{can_hold,frame_sink,nullptr});
+    const auto xr=bridge.status();
+    if(connected&&api->openxr&&api->openxr->get_xr_session)
+        late_session_recovered=bridge.adopt_existing_session(reinterpret_cast<void*>(api->openxr->get_xr_session()),device.Get(),static_cast<ID3D12CommandQueue*>(api->renderer->command_queue));
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    bridge_installed=connected;
+    if(!connected){
+        active=false;state="waiting_for_portable_openxr";
+        if(xr.disabled||xr.hook_failure!=99){failed=true;failure_reason="portable_hook_install_failed";}
+    }else{
+        active=flight_allowed&&glow_requested&&!reset_pending;
+        state=active?"waiting_current_scene_pair":"waiting_for_flight";
+    }
+    return connected;
+}
 bool initialize(const UEVR_PluginInitializeParam* params){
     api=params;device=static_cast<ID3D12Device*>(api->renderer->device);HMODULE module=nullptr;GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,reinterpret_cast<LPCWSTR>(&present),&module);
     wchar_t path[32768]{};if(!module||!GetModuleFileNameW(module,path,32768))return false;const auto directory=std::filesystem::path(path).parent_path();assets_path=directory/L"ac8-hud-assets";
@@ -247,19 +382,22 @@ bool initialize(const UEVR_PluginInitializeParam* params){
     const int c=api->functions->register_inline_hook(methods[10],reinterpret_cast<void*>(&reset),reinterpret_cast<void**>(&original_reset));
     const int d=api->functions->register_inline_hook(methods[16],reinterpret_cast<void*>(&region),reinterpret_cast<void**>(&original_region));
     const int e=api->functions->register_inline_hook(methods[26],reinterpret_cast<void*>(&barriers),reinterpret_cast<void**>(&original_barrier));
-    if(a<0||b<0||c<0||d<0||e<0||!original_copy||!original_execute||!original_reset||!original_region||!original_barrier){failed=true;state="hook_failed_off";return true;}
-    bridge_installed=bridge.attach(api,{can_hold,frame_sink,nullptr});
-    if(bridge_installed&&api->openxr&&api->openxr->get_xr_session&&api->vr&&api->vr->is_openxr&&api->vr->is_openxr())
-        late_session_recovered=bridge.adopt_existing_session(reinterpret_cast<void*>(api->openxr->get_xr_session()),device.Get(),static_cast<ID3D12CommandQueue*>(api->renderer->command_queue));
-    if(api->sdk&&api->sdk->callbacks&&api->sdk->callbacks->on_pre_engine_tick)
-        api->sdk->callbacks->on_pre_engine_tick(engine_tick);
-    if(!api->callbacks->on_custom_event||!api->callbacks->on_custom_event(lifecycle)){failed=true;state="lifecycle_callback_failed_off";}
-    if(!api->callbacks->on_present(present)){failed=true;state="callback_failed_off";}if(api->callbacks->on_device_reset)api->callbacks->on_device_reset(device_reset);return true;
+    if(a<0||b<0||c<0||d<0||e<0||!original_copy||!original_execute||!original_reset||!original_region||!original_barrier){failed=true;state="hook_failed_off";return false;}
+    try_portable_bridge();
+    if(!api->callbacks->on_present(present)){failed=true;state="callback_failed_off";}if(api->callbacks->on_device_reset)api->callbacks->on_device_reset(device_reset);return !failed;
 }
 }
 extern "C"  void uevr_plugin_required_version(UEVR_PluginVersion* v){if(v)*v={UEVR_PLUGIN_VERSION_MAJOR,UEVR_PLUGIN_VERSION_MINOR,UEVR_PLUGIN_VERSION_PATCH};}
 extern "C"  bool uevr_plugin_initialize(const UEVR_PluginInitializeParam* p){
-    if(!p||!p->renderer||!p->sdk||!p->sdk->stereo_hook||!p->sdk->frhitexture2d||!p->callbacks||!p->functions||!p->sdk->stereo_hook->get_ui_render_target||!p->sdk->frhitexture2d->get_native_resource||!p->callbacks->on_present||!p->functions->register_inline_hook||p->renderer->renderer_type!=UEVR_RENDERER_D3D12||!p->renderer->device||!p->renderer->command_queue)return false;
-    try{return hud_renderer::initialize(p);}catch(...){hud_renderer::failed=true;hud_renderer::state="initialization_failed_off";return true;}
+    using namespace hud_renderer;
+    if(!p||!p->functions||!p->functions->log_info)return false;
+    api=p;
+    static_cast<void>(0);
+    if(p->sdk&&p->sdk->callbacks&&p->sdk->callbacks->on_pre_engine_tick)p->sdk->callbacks->on_pre_engine_tick(engine_tick);
+    if(p->callbacks&&p->callbacks->on_custom_event)p->callbacks->on_custom_event(lifecycle);
+    if(!p->renderer||!p->sdk||!p->sdk->stereo_hook||!p->sdk->frhitexture2d||!p->callbacks||!p->sdk->stereo_hook->get_ui_render_target||!p->sdk->frhitexture2d->get_native_resource||!p->callbacks->on_present||!p->functions->register_inline_hook||p->renderer->renderer_type!=UEVR_RENDERER_D3D12||!p->renderer->device||!p->renderer->command_queue){
+        failed=true;state=failure_reason="required_d3d12_api_unavailable";static_cast<void>(0);return false;}
+    if(!p->vr||!p->vr->is_openxr||!p->vr->is_openxr()){
+        failed=true;state=failure_reason="openvr_not_supported";static_cast<void>(0);return false;}
+    try{return initialize(p);}catch(const std::exception& e){failed=true;state=failure_reason="initialization_failed_off";if(p->functions->log_error)p->functions->log_error("[AC8 Glow] Initialization failed: %s",e.what());return false;}catch(...){failed=true;state=failure_reason="initialization_failed_off";return false;}
 }
-

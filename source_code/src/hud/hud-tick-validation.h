@@ -1,8 +1,4 @@
-// PE metadata and instruction bytes for the supported HUD tick functions.
-// Derived from the verified executable; these are compatibility guards, not
-// runtime object addresses or data captured from a player's session.
-
-// Supported executable instruction signatures.
+// Generated from the SHA256-verified executable by prepare-hud-tick-probe.py.
 static constexpr DWORD gameTimestamp=1788928637, gameImageSize=563453952;
 static constexpr uintptr_t tickRVAs[]={0x727a270,0x726c1b0,0x7250170};
 static constexpr unsigned char tickHeads[3][32]={

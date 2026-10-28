@@ -9,6 +9,7 @@
 #include "native/native_generation.h"
 #include <memory>
 #include "hud_policy.h"
+#include "surface_formats.h"
 
 namespace hud_route_glow {
 using Microsoft::WRL::ComPtr;
@@ -37,7 +38,8 @@ class Renderer {
         t.Transition={r,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,a,b};l->ResourceBarrier(1,&t);
     }
 public:
-    Renderer(ID3D12Device* d,const std::filesystem::path& assets):device_(d),native_(d,assets){
+    Renderer(ID3D12Device* d,const std::filesystem::path& assets,UINT source_width=2560,UINT source_height=1338,DXGI_FORMAT source_format=DXGI_FORMAT_B8G8R8A8_UNORM):device_(d),native_(d,assets){
+        if(!surface_formats::dimensions(source_width,source_height)||!surface_formats::family(source_format))throw std::runtime_error("Unsupported HUD surface");
         D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=10;
         D3D12_ROOT_PARAMETER parameters[3]{};parameters[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         parameters[0].DescriptorTable={1,&range};parameters[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
@@ -91,9 +93,11 @@ public:
         native_generation::check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&srv_)));
         const UINT stride=d->GetDescriptorHandleIncrementSize(hd.Type);
         D3D12_RESOURCE_DESC td=native_.output(421)->GetDesc();D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;
-        for(auto* resource:{std::addressof(preview_),std::addressof(sharp_),std::addressof(filtered_)})native_generation::check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&td,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(resource->ReleaseAndGetAddressOf())));
+        for(auto* resource:{std::addressof(preview_),std::addressof(filtered_)})native_generation::check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&td,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(resource->ReleaseAndGetAddressOf())));
+        auto sharp_desc=td;sharp_desc.Width=source_width;sharp_desc.Height=source_height;sharp_desc.Format=surface_formats::storage(source_format);
+        native_generation::check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&sharp_desc,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&sharp_)));
         td.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;native_generation::check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&td,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&mask_)));
-        for(UINT i=0;i<10;++i){D3D12_SHADER_RESOURCE_VIEW_DESC view{};view.Format=i==6?DXGI_FORMAT_BC7_UNORM_SRGB:i==9?DXGI_FORMAT_R16G16B16A16_FLOAT:i==0?DXGI_FORMAT_B8G8R8A8_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;
+        for(UINT i=0;i<10;++i){D3D12_SHADER_RESOURCE_VIEW_DESC view{};view.Format=i==6?DXGI_FORMAT_BC7_UNORM_SRGB:i==9?DXGI_FORMAT_R16G16B16A16_FLOAT:i==0?surface_formats::view(source_format):DXGI_FORMAT_R8G8B8A8_UNORM;
             view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;view.Texture2D.MipLevels=i==6?8:1;
             d->CreateShaderResourceView(input(i),&view,{srv_->GetCPUDescriptorHandleForHeapStart().ptr+size_t(i)*stride});}
         hd={};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=3;
@@ -103,26 +107,31 @@ public:
     }
     ID3D12Resource* input(unsigned i){const int ids[]={421,325,316,340,333,338,0,1088};return i==0?sharp_.Get():i==6?deco_.Get():i==9?mask_.Get():i<8?native_.output(ids[i]):nullptr;}
     ID3D12Resource* glowInput(){return native_.output(421);}
+    DXGI_FORMAT sourceView()const{return surface_formats::view(sharp_->GetDesc().Format);}
     void policy(const hud_policy::Snapshot& value){policy_=value;}
     unsigned usedRegions()const{return used_regions_;}
     ID3D12Resource* parameters(){return parameters_.Get();}
     bool record(ID3D12GraphicsCommandList* list,ID3D12Resource* destination,ID3D12Resource* sharp,bool overlay=true){
         if(!list||!destination||!sharp||destination==sharp)return false;
         const auto desc=destination->GetDesc();ComPtr<ID3D12Device> device;
-        if(desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||desc.Width!=2560||desc.Height!=1338||desc.DepthOrArraySize!=1||desc.MipLevels!=1||desc.SampleDesc.Count!=1||
-           (desc.Format!=DXGI_FORMAT_B8G8R8A8_UNORM&&desc.Format!=DXGI_FORMAT_B8G8R8A8_TYPELESS&&desc.Format!=DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)||
+        const auto owned=sharp_->GetDesc();
+        if((overlay&&(desc.Width!=2560||desc.Height!=1338||surface_formats::family(desc.Format)!=1))||!surface_formats::compatible(desc,owned)||
            FAILED(destination->GetDevice(IID_PPV_ARGS(&device)))||device.Get()!=device_.Get())return false;
         const auto sourceDesc=sharp->GetDesc();ComPtr<ID3D12Device> sourceDevice;
-        if(sourceDesc.Dimension!=desc.Dimension||sourceDesc.Width!=desc.Width||sourceDesc.Height!=desc.Height||sourceDesc.DepthOrArraySize!=1||sourceDesc.MipLevels!=1||sourceDesc.SampleDesc.Count!=1||
-            (sourceDesc.Format!=DXGI_FORMAT_B8G8R8A8_UNORM&&sourceDesc.Format!=DXGI_FORMAT_B8G8R8A8_TYPELESS&&sourceDesc.Format!=DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)||
+        if(!surface_formats::compatible(sourceDesc,desc)||
             FAILED(sharp->GetDevice(IID_PPV_ARGS(&sourceDevice)))||sourceDevice.Get()!=device_.Get())return false;
+        
+        
+        {
         // Contract inherited from the exact host UI CopyResource: sharp remains
         // COPY_SOURCE, destination remains COPY_DEST. Owned resources persist.
         transition(list,sharp_.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
         list->CopyResource(sharp_.Get(),sharp);transition(list,sharp_.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
         const auto rtbase=rtv_->GetCPUDescriptorHandleForHeapStart();const UINT rtstride=device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         const D3D12_CPU_DESCRIPTOR_HANDLE maskRT{rtbase.ptr+rtstride},filterRT{rtbase.ptr+2*rtstride};
         const D3D12_VIEWPORT policyViewport{0,0,2560,1338,0,1};const D3D12_RECT policyScissor{0,0,2560,1338};
+        {
         transition(list,mask_.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
         const float zero[4]{};list->ClearRenderTargetView(maskRT,zero,0,nullptr);
         ID3D12DescriptorHeap* policyHeap=srv_.Get();list->SetDescriptorHeaps(1,&policyHeap);list->SetGraphicsRootSignature(root_.Get());list->SetPipelineState(mask_pso_.Get());
@@ -134,19 +143,25 @@ public:
             list->RSSetScissorRects(1,&clip);list->SetGraphicsRoot32BitConstants(2,8,&region,0);list->DrawInstanced(3,1,0,0);}
         list->RSSetScissorRects(1,&policyScissor);
         transition(list,mask_.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
+        {
         transition(list,filtered_.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
         list->SetPipelineState(filter_pso_.Get());list->OMSetRenderTargets(1,&filterRT,FALSE,nullptr);list->DrawInstanced(3,1,0,0);
         transition(list,filtered_.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        }
         const bool generated=native_.record(list,filtered_.Get());
         transition(list,filtered_.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         if(!generated)return false;
         // Re-record upload each time so a cancelled/reset list never leaves a
         // CPU-only 'initialized' flag claiming GPU initialization happened.
+        {
         transition(list,deco_.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
         for(UINT i=0;i<8;++i){D3D12_TEXTURE_COPY_LOCATION source{},target{};source.pResource=deco_upload_.Get();source.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;source.PlacedFootprint=deco_footprints_[i];
             target.pResource=deco_.Get();target.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;target.SubresourceIndex=i;list->CopyTextureRegion(&target,0,0,0,&source,nullptr);}
         transition(list,deco_.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
         if(!overlay)return true;
+        
         transition(list,preview_.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
         ID3D12DescriptorHeap* heap=srv_.Get();list->SetDescriptorHeaps(1,&heap);list->SetPipelineState(pso_.Get());list->SetGraphicsRootSignature(root_.Get());
         list->SetGraphicsRootDescriptorTable(0,srv_->GetGPUDescriptorHandleForHeapStart());
