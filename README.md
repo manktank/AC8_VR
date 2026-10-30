@@ -1,12 +1,18 @@
 # AC8 VR
 
+# **OPENXR + NATIVE STEREO REQUIRED**
+
+Select **OpenXR** when injecting with UEVR, and use **Native Stereo**.
+
+**SteamVR users can still use OpenXR.** Set SteamVR as your active
+OpenXR runtime, then select OpenXR in UEVR. You can keep using
+SteamVR with your headset.
+
 **Unreleased source update.** The published `v0.1.0` release and tag are unchanged. A new player release will follow tester feedback.
 
 A community UEVR profile for Ace Combat 8. UEVR and the EAC bypass remain separate prerequisites; see [installation](INSTALLATION.md).
 
 ## FRESH INSTALL
-
-This profile was designed for Native Stereo in UEVR. Use OpenXR for the glow effect.
 
 1. Close the game. Back up your existing AceCombat8 profile first: copy the entire
    %APPDATA%\UnrealVRMod\AceCombat8 folder somewhere safe.
@@ -14,7 +20,7 @@ This profile was designed for Native Stereo in UEVR. Use OpenXR for the glow eff
 3. Extract this ZIP into %APPDATA%\UnrealVRMod so it contains the new AceCombat8
    folder. Use a clean install; do not mix in scripts or Lua files from older
    profiles or other mods. Keep the supplied folders and plugin/assets intact.
-4. Launch the game, inject UEVR and use Native Stereo.
+4. Launch the game, inject UEVR using OpenXR, and use Native Stereo.
 
 ## WHAT'S NEW
 
