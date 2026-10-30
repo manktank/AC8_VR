@@ -590,3 +590,36 @@ function registry.start(finalize)
 end
 registry.start()
 
+-- Backend requirement warning. UI-only: no gameplay polling or saved preferences.
+do
+ local announced=false
+ local function warningText()
+  if imgui.text_colored then imgui.text_colored('OPENXR + NATIVE STEREO REQUIRED',0xff40c0ff)
+  else imgui.text('OPENXR + NATIVE STEREO REQUIRED')end
+  imgui.text('OpenVR is active. This profile requires OpenXR; HUD glow cannot work here.')
+  imgui.text('Restart the game, select OpenXR in the UEVR injector, and use Native Stereo.')
+  imgui.text('SteamVR users: set SteamVR as your OpenXR runtime. You can keep using SteamVR.')
+ end
+ uevr.sdk.callbacks.on_draw_ui(function()
+  if not imgui or not imgui.text then return end
+  local ok,openvr=pcall(function()
+   local vr=uevr.params.vr
+   return vr.is_runtime_ready()==true and vr.is_openvr()==true
+  end)
+  if not ok or not openvr then return end
+  if imgui.separator then imgui.separator()end
+  warningText()
+  if imgui.separator then imgui.separator()end
+  if imgui.open_popup and imgui.begin_popup and imgui.end_popup then
+   local id='AC8 VR requires OpenXR##AC8_VR-runtime-warning'
+   if not announced then imgui.open_popup(id);announced=true end
+   if imgui.begin_popup(id)then
+    warningText()
+    if imgui.button and imgui.close_current_popup and imgui.button('Understood##AC8_VR-runtime-warning')then imgui.close_current_popup()end
+    imgui.end_popup()
+   end
+  end
+ end)
+end
+-- End backend requirement warning.
+
