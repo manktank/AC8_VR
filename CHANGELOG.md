@@ -1,5 +1,9 @@
 # Changelog
 
+## AC8-VR_MankTank_v0.3.2 — 2026-11-08
+
+- Package the tested build with the MankTank OpenXR layer ID.
+
 ## AC8-VR_MankTank_v0.3.1 — 2026-11-08
 
 - Include the two frame-mask shaders required to initialize HUD glow on a clean install.

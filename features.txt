@@ -1,4 +1,4 @@
-AC8-VR_MankTank_v0.3.1 features
+AC8-VR_MankTank_v0.3.2 features
 
 Cockpit HUD layout
 - Resolution independence - layouts should still work and hud elements
