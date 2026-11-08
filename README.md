@@ -1,8 +1,8 @@
-# AC8 VR
+# AC8-VR_MankTank_v003
 
 **UEVR and OpenXR are required. Select OpenXR in the UEVR injector and use Native Stereo.** If you use SteamVR, set it as your active OpenXR runtime, then still choose OpenXR in UEVR.
 
-AC8 VR is a community profile for playing Ace Combat 8 in VR. The November 8, 2026 community preview includes the optimized runtime and the latest cockpit HUD controls.
+AC8 VR is a community profile for playing Ace Combat 8 in VR. This build includes the optimized runtime and the latest cockpit HUD controls.
 
 [Install the profile](INSTALLATION.md) · [FAQ](FAQ.md) · [Features](features.txt) · [Compatibility](docs/COMPATIBILITY.md)
 

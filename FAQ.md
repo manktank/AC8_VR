@@ -29,4 +29,4 @@ While in the cockpit, adjust the camera offsets in UEVR. You can also open the U
 
 ### Do I need OFXR Bridge?
 
-OFXR Bridge is optional. Use the normal OpenXR setup for this preview. If you encounter a freeze with OFXR enabled, fully close the game, disable OFXR, then retry.
+OFXR Bridge is optional. Use the normal OpenXR setup for this build. If you encounter a freeze with OFXR enabled, fully close the game, disable OFXR, then retry.

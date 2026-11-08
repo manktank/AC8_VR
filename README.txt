@@ -1,4 +1,4 @@
-AC8 VR Community Preview — November 8, 2026
+AC8-VR_MankTank_v003
 
 UEVR, OPENXR AND NATIVE STEREO ARE REQUIRED.
 

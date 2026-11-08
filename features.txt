@@ -1,5 +1,4 @@
-AC8 VR features
-November 2026 community preview
+AC8-VR_MankTank_v003 features
 
 Cockpit HUD layout
 - Move and resize the radar, center ladder, aircraft status, mission
@@ -63,7 +62,7 @@ Modular profile and compatibility
 - Keep AC8_VR-Core.lua enabled. The seven other scripts let you choose
   whether to use aircraft presets, cinematics and hangar presentation,
   HUD glow, HUD layout, loading, camera stabilization and target changes.
-- The preview reduces repeated HUD lookups and rendering work and uses
+- This build reduces repeated HUD lookups and rendering work and uses
   quieter logging.
 - Requires UEVR with OpenXR and Native Stereo. Restart the game and
   inject again after changing the game resolution or UEVR render resolution.

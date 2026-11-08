@@ -1,9 +1,9 @@
-# Install AC8 VR
+# Install AC8-VR_MankTank_v003
 
 **Requires UEVR, OpenXR and Native Stereo.** Use Windows x64, DirectX 12, a working OpenXR runtime and the game's single-player EAC bypass setup. UEVR and the EAC bypass are separate prerequisites. See [UEVR](https://uevr.io/) and the [Flat2VR Modding Discord](https://discord.gg/flat2vr).
 
 1. Close the game. Back up your entire `%APPDATA%\UnrealVRMod\AceCombat8` profile, then move the old folder out of `UnrealVRMod`.
-2. Extract `AC8-VR-Community-Preview-20261108.zip` into `%APPDATA%\UnrealVRMod`. The ZIP creates an `AceCombat8` folder with `scripts`, `data`, `plugins`, `config.txt` and `cvars_data.txt`.
+2. Extract `AC8-VR_MankTank_v003.zip` into `%APPDATA%\UnrealVRMod`. The ZIP creates an `AceCombat8` folder with `scripts`, `data`, `plugins`, `config.txt` and `cvars_data.txt`.
 3. Connect your headset and start its PC VR runtime. Launch the game with your EAC bypass setup. Open UEVR, select `AceCombat8.exe`, choose **OpenXR**, enable plugins, and inject. Use **Native Stereo**.
 4. Enter a mission and check the HUD. Open **Script UI** for layout and aircraft saves. See the [FAQ](FAQ.md) for the controls.
 
