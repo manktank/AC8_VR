@@ -21,5 +21,5 @@ try {
  foreach($ac8Asset in (Get-Content -LiteralPath 'runtime-assets.txt')){
   if($ac8Asset){Copy-Item -LiteralPath (Join-Path 'src/renderer/hud-route-assets' $ac8Asset) -Destination $ac8AssetOutput}
  }
- Write-Output "Built matching loader, payload, bridge, manifest and 44 assets: $ac8PluginOutput"
+ Write-Output "Built matching loader, payload, bridge, manifest and 49 assets: $ac8PluginOutput"
 }finally{Pop-Location}

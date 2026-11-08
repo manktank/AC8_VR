@@ -45,3 +45,5 @@ pso-4281-VS.dxbc
 AC8_VR-identity-filter-PS.dxbc
 AC8_VR-sharp-layer-PS.dxbc
 AC8_VR-sharp-base-PS.dxbc
+AC8_VR-frame-mask-PS.dxbc
+AC8_VR-frame-mask-VS.dxbc

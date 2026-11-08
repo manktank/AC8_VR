@@ -1,11 +1,15 @@
 # Changelog
 
+## AC8-VR_MankTank_v0.3.1 — 2026-11-08
+
+- Include the two frame-mask shaders required to initialize HUD glow on a clean install.
+
 ## AC8-VR_MankTank_v0.3.0 — 2026-11-08
 
 - Add independent Mission Information and Wingman Status scaling to the grouped HUD controls and saved layouts.
 - Reduce repeated lookups and rendering work across the Lua and native modules. Remove development capture dumps, performance reports and mission-exit discovery statistics. Retain functional glow status, recovery data and error messages.
 - Ship the current cockpit defaults and document optional modules, aircraft saves and the resolution restart requirement.
-- Package the current OpenXR runtime and all 47 required renderer assets.
+- Package the current OpenXR runtime and 47 renderer assets.
 
 ## Unreleased — development source update, 2026-10-27
 

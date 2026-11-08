@@ -74,3 +74,5 @@ plugins/ac8-hud-assets/pso-4281-VS.dxbc
 plugins/ac8-hud-assets/AC8_VR-identity-filter-PS.dxbc
 plugins/ac8-hud-assets/AC8_VR-sharp-layer-PS.dxbc
 plugins/ac8-hud-assets/AC8_VR-sharp-base-PS.dxbc
+plugins/ac8-hud-assets/AC8_VR-frame-mask-PS.dxbc
+plugins/ac8-hud-assets/AC8_VR-frame-mask-VS.dxbc

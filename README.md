@@ -1,4 +1,4 @@
-# AC8-VR_MankTank_v0.3.0
+# AC8-VR_MankTank_v0.3.1
 
 **UEVR and OpenXR are required. Select OpenXR in the UEVR injector and use Native Stereo.** If you use SteamVR, set it as your active OpenXR runtime, then still choose OpenXR in UEVR.
 
