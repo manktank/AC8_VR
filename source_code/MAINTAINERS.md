@@ -48,6 +48,6 @@ The private validation run passed 24 Lua suites, all 128 optional-module combina
 
 ## Release workflow
 
-Current main is an unreleased source snapshot. `VERSION` and tag v0.1.0 retain the last published version until the owner chooses the next release. Do not alter an existing release, tag or archive as part of a source-only update. Before the next release, align the selected version, changelog and public artifact names.
+Keep `VERSION`, the release tag, the changelog, and the player ZIP name aligned when preparing a release. Leave older published releases and tags in place.
 
 Build a fresh profile from `PROFILE-FILES.txt`, with no prior Lua set. Omit first-setup markers, backup JSONs, caches, recovery journals, captures, logs and personal cameras.txt; include all 47 assets. Preserve existing users' setup marker/settings when testing or upgrading. Test fresh launch, module removal, plane switches/saves/fallback/master-off, HUD movement/FPM, pause/retry/tutorial, loading, hangar/Aircraft Set, glow and mission exit before publication.

@@ -1,6 +1,6 @@
 # Changelog
 
-## AC8-VR_MankTank_v003 — 2026-11-08
+## AC8-VR_MankTank_v0.3.0 — 2026-11-08
 
 - Add independent Mission Information and Wingman Status scaling to the grouped HUD controls and saved layouts.
 - Reduce repeated lookups and rendering work across the Lua and native modules. Restore quieter runtime logging.
