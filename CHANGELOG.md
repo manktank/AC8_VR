@@ -3,7 +3,7 @@
 ## AC8-VR_MankTank_v0.3.0 — 2026-11-08
 
 - Add independent Mission Information and Wingman Status scaling to the grouped HUD controls and saved layouts.
-- Reduce repeated lookups and rendering work across the Lua and native modules. Restore quieter runtime logging.
+- Reduce repeated lookups and rendering work across the Lua and native modules. Remove development capture dumps, performance reports and mission-exit discovery statistics. Retain functional glow status, recovery data and error messages.
 - Ship the current cockpit defaults and document optional modules, aircraft saves and the resolution restart requirement.
 - Package the current OpenXR runtime and all 47 required renderer assets.
 

@@ -63,7 +63,9 @@ Modular profile and compatibility
   whether to use aircraft presets, cinematics and hangar presentation,
   HUD glow, HUD layout, loading, camera stabilization and target changes.
 - This build reduces repeated HUD lookups and rendering work and uses
-  quieter logging.
+  no development capture dumps, performance reports or mission-exit
+  discovery statistics. The mod keeps the glow status and recovery data
+  it uses in play, along with error messages.
 - Requires UEVR with OpenXR and Native Stereo. Restart the game and
   inject again after changing the game resolution or UEVR render resolution.
 - For module toggles, cockpit save steps and troubleshooting, see README.md
