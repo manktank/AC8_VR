@@ -1,6 +1,8 @@
 AC8-VR_MankTank_v0.3.0 features
 
 Cockpit HUD layout
+- Resolution independence - layouts should still work and hud elements
+  should stay in place regardless of your current resolution.
 - Move and resize the radar, center ladder, aircraft status, mission
   information and wingman status live from UEVR's Script UI.
 - Move score, current target and time remaining together as Mission
