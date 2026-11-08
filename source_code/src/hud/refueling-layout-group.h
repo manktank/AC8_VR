@@ -57,8 +57,7 @@ static bool releaseRefresh(Row& row){
 }
 static bool signature(uintptr_t rva,const std::vector<unsigned char>& expected){
     auto base=reinterpret_cast<const unsigned char*>(GetModuleHandleW(nullptr));
-    std::vector<unsigned char> actual(expected.size());SIZE_T n=0;
-    return base&&ReadProcessMemory(GetCurrentProcess(),base+rva,actual.data(),actual.size(),&n)&&n==actual.size()&&actual==expected;
+    return base&&ac8_game_compatibility::code_proof(base+ac8_game_compatibility::translate(rva),expected);
 }
 static bool codeGuard(){
     if(codeChecked)return codeValid;codeChecked=true;

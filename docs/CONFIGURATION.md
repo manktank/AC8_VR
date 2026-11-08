@@ -1,11 +1,11 @@
 # Settings and optional modules
 
-Core is required. The other seven files are independently optional: removing one with the game closed disables its work next launch. General HUD controls work without AircraftPresets; aircraft camera/size controls work without HUD Layout. HUD-preset controls naturally apply to the HUD feature when both are selected.
+Keep Core enabled. The other seven scripts are independently optional. Uncheck a script in UEVR to disable its Lua code. To disable the whole module, move its file out of `scripts` while the game is closed and relaunch. The native plugin selects its work from the files present at startup. General HUD controls work without AircraftPresets; aircraft camera/size controls work without HUD Layout. HUD-preset controls naturally apply to the HUD feature when both are selected.
 
 | Script | Responsibility |
 |---|---|
 | `AC8_VR-Core.lua` | Required shared services, pause/retry navigation, native tutorial card/blur policy and removed-feature recovery. |
-| `AC8_VR-HUD_Layout.lua` | General HUD layout/group controls, linked ladder/FPM presentation, shared/global HUD defaults and first-launch UI setup. |
+| `AC8_VR-HUD_Layout.lua` | General HUD layout/group controls, linked ladder/FPM presentation, mission information and wingman status scaling, shared/global HUD defaults and first-launch UI setup. |
 | `AC8_VR-AircraftPresets.lua` | Per-aircraft HUD, camera, UI Size and cockpit-size preferences; save/reset and master-enable controls. |
 | `AC8_VR-HUD_Glow.lua` | Gameplay admission and widget policy for native per-eye glow. |
 | `AC8_VR-Targets.lua` | World-target presentation, labels, material adjustments and indicator layout. |
@@ -23,7 +23,7 @@ Core is required. The other seven files are independently optional: removing one
 
 Adjust UI Size in UEVR and save it for the plane, either with its separate save button or a HUD save. Flight UI Size includes pause/retry; other modes use the user's normal size. Cockpit size applies only to cockpit view and changes perceived scale, not headset FOV. Its save is included with cockpit-camera saves.
 
-The FPM follows ladder movement/scale and retains native velocity motion. Separate FPM alignment controls provide an additional trim. The rejected cockpit FOV experiment and combined radar/wingman/mission mover are not included.
+The FPM follows ladder movement/scale and retains native velocity motion. Separate FPM alignment controls provide an additional trim. Mission information and wingman status each have their own scale controls.
 
 ## First launch and runtime state
 

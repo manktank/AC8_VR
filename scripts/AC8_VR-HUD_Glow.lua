@@ -14,6 +14,90 @@ end
 local function gameplay(R)
  return not R.settingsBusy('presentation','gameplay')and R.context.flight==true and R.viewTargetName():match('^BP_PlayerPlane_')~=nil and R.matchState()~='WaitingToStart'
 end
+-- Own automatic glow startup, retries and lifecycle; no live test controls.
+local function installSplitDefault(R)
+ local host=R.host('utility','AC8_VR-GlowSplitDefault.lua')
+ local status={state={phase=-1,recording=false},message='Split is the default when HUD glow is active.',waiting=false}
+ R.glowSplitStatus=status
+ local action,owner,scopeOwner=nil,nil,nil
+ local glowActive,known,wantDefault,stopped=false,false,true,false
+ local retryAt,sequence=0,0
+ local function dispatch(value)host.api:dispatch_custom_event('AC8_SelectiveGlowSplitControl',value)end
+ host.sdk.callbacks.on_lua_event(function(name,data)
+  if stopped then return end
+  if name=='AC8_GlowFixBrightness'then
+   local on=data=='on'
+   if on~=glowActive then wantDefault=true;retryAt=0 end
+   glowActive=on
+  elseif name=='AC8_SelectiveGlowSplitState'then
+   local ok,err=pcall(function()
+    -- Use the event's fresh native report, not Core's cached settings reader.
+    local report=json.load_file('AC8_VR-SelectiveGlowSplit-state.json')
+    assert(type(report)=='table'and type(report.phase)=='number','Native glow status was unreadable.')
+    status.state=report;status.waiting=false;known=true
+    if report.recording then
+     if report.phase==1 then
+      wantDefault=false
+      status.message=(report.admittedCopies or 0)>0 and'Split renderer is active.'or'Split is starting; waiting for a verified glow source.'
+     else status.message='CURRENT baseline selected for comparison; recording continues.' end
+    else
+     owner=nil
+     local reason=report.endReason or report.reason
+     if reason=='outside_admitted_glow_flight'or reason=='ui_source_changed'or reason=='identity_tracking_lifetime_or_capacity_stop'then wantDefault=true end
+     status.message='Split is the default. Last session: '..tostring(reason)..'.'
+    end
+    local reason=report.reason
+    if report.ready==false then wantDefault=false;status.message='Split unavailable: '..tostring(reason)
+    elseif wantDefault and report.phase~=1 then
+     local transient=reason=='not_started'or reason=='current_ui_source_unavailable'or reason=='radio_identity_selection_refused'or reason=='enter_glow_enabled_flight_first'
+     local stoppedNormally=report.endReason=='finished_by_user'or report.endReason=='outside_admitted_glow_flight'or report.endReason=='ui_source_changed'or report.endReason=='identity_tracking_lifetime_or_capacity_stop'
+     if stoppedNormally then retryAt=0
+     elseif transient then retryAt=os.time()+1
+     elseif report.phase==0 or report.endReason~='not_started'then wantDefault=false;status.message='Split stopped: '..tostring(report.endReason or reason)..'; '..tostring(reason)end
+    end
+   end)
+   if not ok then known=false;status.waiting=false;status.message='Glow status check failed: '..tostring(err)end
+  end
+ end)
+ host.sdk.callbacks.on_post_engine_tick(function()
+  if stopped then return end
+  local context=R.context
+  local live=context and context.flight and R.isLiveObject(context.hud)
+  if live and scopeOwner~=context.hud then scopeOwner=context.hud;wantDefault=true;retryAt=0 end
+  local eligible=live and glowActive and R.glowGameplayAllowed==true
+  if status.state.recording and not owner and live then owner=context.hud end
+  if status.state.recording and(not live or owner~=context.hud or not eligible)then
+   if not status.waiting then action='off';wantDefault=true end
+  end
+  local automatic=false
+  if not action and known and status.state.ready~=false and eligible and wantDefault and not status.waiting and os.time()>=retryAt then
+   if status.state.phase==1 then wantDefault=false
+   else action='toggle';automatic=true end
+  end
+  if not action then return end;local request=action;action=nil
+  local ok,err=pcall(function()
+   if request=='toggle'then
+    assert(eligible,'Enter a mission with HUD glow enabled first.')
+    if not automatic then wantDefault=false end
+    owner=context.hud;sequence=sequence+1;retryAt=os.time()+1;status.waiting=true
+    status.message=automatic and'Starting the default split renderer.'or'Switching the diagnostic comparison.'
+    dispatch('toggle:'..tostring(os.time())..'-'..string.format('%.0f',os.clock()*1000000)..'-'..sequence)
+   elseif request=='status'then dispatch('status')
+   else
+    status.waiting=true;status.message=request=='save'and'Saving capture; the default split will resume automatically.'or'Leaving the current glow session.'
+    dispatch(request=='save'and'save'or'off')
+   end
+  end)
+  if not ok then status.waiting=false;status.message=tostring(err)end
+ end)
+ host.sdk.callbacks.on_script_reset(function()
+  stopped=true;status.waiting=false;dispatch('off')
+  if R.glowSplitStatus==status then R.glowSplitStatus=nil end
+ end)
+ -- Initial queries also cover a Lua reload while the mission/glow is already on.
+ dispatch('status');host.api:dispatch_custom_event('AC8_GlowFixQuery','')
+end
+
 assert(not registry.sections['glow_lifecycle'], 'Duplicate AC8 VR section: glow_lifecycle')
 registry.sections['glow_lifecycle'] = function(R)
 local tutorialState=R.ensureTutorialState()
@@ -25,12 +109,13 @@ do
 -- the current gameplay view target, rather than the mere presence of that HUD.
 R.glowGameplayAllowed=false;R.glowGameplayReason='waiting for gameplay'
 
-local lastFlight,lastPaused=nil,nil
+local lastFlight,lastPaused,lastMenuBlend=nil,nil,nil
 local lastMission,lastGameplayLevel=nil,nil
 local statics=nil
+local function invokeInventory(o,k,...)if AC8Runtime.inventory then return AC8Runtime.inventory.call(o,k,...)end;return o[k](o,...)end
 local function invoke(o,k,...)
     if not o then return nil end
-    local ok,v=pcall(function(...) return o[k](o,...) end,...)
+    local ok,v=pcall(invokeInventory,o,k,...)
     if ok then return v end
 end
 local function dispatch(data)
@@ -74,7 +159,7 @@ local function update(post)
     end
     if flight and actualFlight and paused==false then lastGameplayLevel=hudLevel end
     local tutorial=post and tutorialState.get(pc,name,paused,R.tick)or tutorialState
-    if flight and tutorial.visible then flight=false;reason='tutorial presentation'end
+    if flight and tutorial.visible then reason='tutorial presentation with widget glow exclusion'end
     local cover=rawget(_G,'AC8VRTransitions')
     if (R.missionLoading and R.missionLoading.active==true)or(cover and not cover.stopped and(cover.loading or(cover.opacity or 0)>0))then
         flight=false;reason='loading/menu cover owns presentation'
@@ -88,6 +173,12 @@ local function update(post)
     elseif name:match('^BP_LiveMenuHUD_C ') and paused~=true then
         lastMission,lastGameplayLevel=nil,nil
     end
+    -- Reuse the existing pause fact: no widget walk, timer, or new callback.
+    -- The native menu blend respects black-panel alpha while retaining glow.
+    -- Send initial state too, including a Lua reload inside an open menu.
+    local menuBlend=flight and paused==true
+    R.glowMenuPresentation=menuBlend
+    if menuBlend~=lastMenuBlend then dispatch(menuBlend and 'menu_blend_enter' or 'menu_blend_exit');lastMenuBlend=menuBlend end
     if type(paused)=='boolean' then
         if lastPaused~=nil and paused~=lastPaused and flight then dispatch(paused and 'pause_enter' or 'pause_exit') end
         lastPaused=paused
@@ -98,13 +189,14 @@ uevr.sdk.callbacks.on_post_engine_tick(function()update(true)end)
 
 end)(AC8Runtime.host('utility','AC8_VR-GlowLifecycle.lua'),AC8Runtime.json,AC8Runtime.log)
 end
+installSplitDefault(R)
 
 
 end
 assert(not registry.sections['hud_policy'], 'Duplicate AC8 VR section: hud_policy')
 registry.sections['hud_policy'] = function(R)
 do
--- ac8 hud policy v50
+-- ac8 hud policy: portrait cutout and radar native-alpha blend only
 (function(uevr,json,print)
 
 
@@ -119,9 +211,10 @@ local noValue={}
 local readMethods={get_full_name=true,GetParent=true,get_outer=true,
     GetVisibility=true,GetRenderOpacity=true,GetActiveWidget=true,
     GetClipping=true,GetPaintSpaceGeometry=true,GetCachedGeometry=true}
+local function invokeInventory(o,k,...)if AC8Runtime.inventory then return AC8Runtime.inventory.call(o,k,...)end;return o[k](o,...)end
 local function call(o,k,...)
     if o==api then
-        local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end;return
+        local ok,v=pcall(invokeInventory,o,k,...);if ok then return v end;return
     end
     if o==nil then return end
     if frameReads and readMethods[k] and select('#',...)==0 then
@@ -141,7 +234,8 @@ local function call(o,k,...)
     end
     return AC8Runtime.objectCall(o,k,...)
 end
-local function field(o,k)local ok,v=pcall(function()return o[k]end);if ok then return v end end
+local function readField(o,k)return o[k]end
+local function field(o,k)local ok,v=pcall(readField,o,k);if ok then return v end end
 local function full(o)return call(o,'get_full_name')end
 local function xy(v)
     local x=field(v,'X') or field(v,'x');local y=field(v,'Y') or field(v,'y')
@@ -266,47 +360,75 @@ local function intersection(a,b)
     local r={math.max(a[1],b[1]),math.max(a[2],b[2]),math.min(a[3],b[3]),math.min(a[4],b[4])}
     if r[1]>=r[3] or r[2]>=r[4]then return nil end;return r
 end
-local function bounds(w,g,size,inset)
+local function bounds(w,g,size,inset,strictClip)
     local ancestors=chain(w);if not ancestors then return nil end
     local r=intersection(rawBounds(w,g,size,inset),{0,0,1,1});if not r then return nil end
 
     for _,a in ipairs(ancestors)do
         local c=call(a,'GetClipping') or call(a,'get_property','Clipping')
+        if strictClip and(type(c)~='number'or c<0 or c>4 or c~=math.floor(c))then return nil end
         if c==1 or c==2 or c==3 or c==4 then
             local clip=rawBounds(a,g,size,0)
-            if clip then r=intersection(r,clip);if not r then return nil end end
+            if clip then r=intersection(r,clip);if not r then return nil end
+            elseif strictClip then return nil end
             if c==2 then break end
         end
     end
     return r
 end
-local artworkBounds=bounds -- Separate only this region in the existing sampled geometry scope.
--- Temporary artwork trial: ONE PlaneIconStatPanel region reuses the existing
--- emissive policy path. No extra render pass or per-bar discovery/setters.
--- The separate text-stat panel is outside this region.
--- Twelve LOCAL widget pixels inset SHRINKS the excluded interior. The surrounding
--- twelve-pixel band gets ordinary authored glow; no special portrait border pass.
+-- Output composition is separate from upstream native glow membership.
+-- New rules require exact cooked owning classes as well as leaf identity.
 local function kind(n,w)
     local class,path=n:match('^(%S+) (.+)$');if not path then return nil end
     local leaf=path:match('%.([^%.]+)$')or''
-    if class=='Image'and leaf=='PlaneIconBackGround'and path:find('.WBP_PlayerStateWidget_1.',1,true)then return 'playerstate-art-region',0,{0,0,1,0}end
-    if class=='Image'and leaf=='Portrait'and path:find('.HUDMessageWidget.',1,true)then return 'portrait',12,{1,1,0,1}end
-    if class=='Image'and leaf=='LayerTwoBackground'and path:find('.WBP_HUD_Message_000.',1,true)then return 'banner',0,{1,0,1,1}end
-end
--- Resolve the two exact authored parents only during existing discovery.
--- The region deliberately includes both image siblings and all weapon/flare
--- bars. Keep source textures, tint, opacity, reload percentages and game writes.
-local function candidate(w,n,category,inset,flags)
-    if category=='playerstate-art-region'then
-        local path=n:match('^Image (.+)%.PlaneIconBackGround$')
-        local plane=call(w,'GetParent');local region=call(plane,'GetParent')
-        if not path or full(plane)~='CanvasPanel '..path..'.PlaneCanvas' or
-           full(region)~='CanvasPanel '..path..'.PlaneIconStatPanel'then return end
-        local tree=call(w,'get_outer')
-        if not tree or call(plane,'get_outer')~=tree or call(region,'get_outer')~=tree then return end
-        w=region;n=full(region)
+    -- Four LOCAL widget units per edge (double the prior two-unit adjustment),
+    -- transformed through current geometry at every paint; no fixed pixel/DPI box.
+    if class=='Image'and leaf=='Portrait'and path:find('.HUDMessageWidget.',1,true)then return 'portrait',4,{0,1,0,0}end
+    if not w then return end
+    local tree=call(w,'get_outer')
+    if not(full(tree)or''):match('^WidgetTree ')then return end
+    local owner=call(tree,'get_outer');local ownerName=full(owner)or''
+    local ownerClass=ownerName:match('^(%S+) ')
+    if class=='Image'and leaf=='MiniMapBackground'and
+       (ownerClass=='WBP_HUD_Radar_Parts_MiniMapBattle_000_C'or
+        ownerClass=='WBP_HUD_Radar_Parts_MiniMapBattleEnlarged_000_C'or
+        ownerClass=='WBP_HUD_Radar_Parts_MiniMapBattleSearch_000_C'or
+        ownerClass=='WBP_HUD_Radar_Parts_MiniMapBattleWhole_000_C')then
+        return 'radar',0,{0,0,1,0}
     end
-    if chain(w)then return{widget=w,name=n,category=category,inset=inset,flags=flags}end
+end
+local currentAttachment
+local function candidate(w,n,category,inset,flags)
+    -- Keep owned inactive radar modes in the
+    -- catalog; live visibility/switcher/geometry still chooses this frame's mask.
+    -- Native paint routing pairs coverage with its producer image; this catalog
+    -- also gives the compatibility path every attached mode on its next update.
+    if (category=='radar'and currentAttachment(w))or(category~='radar'and chain(w))then
+        return{widget=w,name=n,category=category,inset=inset,flags=flags}
+    end
+end
+-- New composition candidates must still be attached reciprocally THIS frame.
+-- Discovery caches membership only for its shortlist, never for paint geometry.
+currentAttachment=function(w)
+    local seen={}
+    for _=1,32 do
+        if not AC8Runtime.isLiveObject(w)or seen[w]then return false end
+        seen[w]=true
+        if S.roots[full(w)or'']then return true end
+        local p=call(w,'GetParent')
+        if p then
+            local i=call(p,'GetChildIndex',w)
+            if type(i)~='number'or i<0 or i>4095 or i~=math.floor(i)or call(p,'GetChildAt',i)~=w then return false end
+            w=p
+        else
+            local tree=call(w,'get_outer')
+            if not(full(tree)or''):match('^WidgetTree ')or call(tree,'get_property','RootWidget')~=w then return false end
+            local owner=call(tree,'get_outer')
+            if call(owner,'get_property','WidgetTree')~=tree then return false end
+            w=owner
+        end
+    end
+    return false
 end
 local function legacyDiscover()
     S.legacyScans=(S.legacyScans or 0)+1
@@ -336,7 +458,7 @@ local function legacyDiscover()
     for _,root in ipairs(ownedRoots)do
         -- A fresh walk supplies names from this exact call, not a cross-frame
         -- name cache. Avoid repeating get_full_name for every discovered child.
-        local owned,names=AC8Runtime.ownedWidgets(root,true)
+        local owned,names=AC8Runtime.ownedWidgets(root)
         if names and frameReads then
             for w,n in pairs(names)do
                 if AC8Runtime.isLiveObject(w)then
@@ -352,8 +474,7 @@ local function legacyDiscover()
     end
     if not complete then
         widgets=call(call(api,'find_uobject','Class /Script/UMG.Widget'),'get_objects_matching',false) or {}
-        S.fallbackScans=(S.fallbackScans or 0)+1
-    else S.ownedScans=(S.ownedScans or 0)+1 end
+    end
     for i,w in ipairs(widgets)do
         if i>32768 then break end
         local n=full(w) or '';local category,inset,flags=kind(n,w);local path=n:match('^%S+ (.+)$')
@@ -367,11 +488,7 @@ local function legacyDiscover()
             end
         end
     end
-    local priority={portrait=1,['playerstate-art-region']=2,['plane-linework']=2,['missile-art']=3,['countermeasure-art']=3,banner=4,['radio-normal-glow']=5}
-    table.sort(S.candidates,function(a,b)
-        local pa,pb=priority[a.category] or 9,priority[b.category] or 9
-        if pa~=pb then return pa<pb end;return a.name<b.name
-    end)
+    table.sort(S.candidates,function(a,b)return a.name<b.name end)
     while #S.candidates>128 do table.remove(S.candidates)end
 end
 -- Only Image objects identify the policy rules, including the artwork anchor. Enumerate that
@@ -382,23 +499,20 @@ local imageClass, userClass
 -- Missing/failed short-name API retains the old full-name route.
 local function relevantImage(w)
     local leaf=call(w,'get_short_name')
-    return type(leaf)~='string' or leaf=='Portrait' or leaf=='LayerTwoBackground' or leaf=='PlaneIconBackGround'
+    return type(leaf)~='string' or leaf=='Portrait'or leaf=='MiniMapBackground'
 end
 local function classObjects(which)
     local class
     if which == 'images' then class = imageClass else class = userClass end
     if not AC8Runtime.isLiveObject(class) then
-        class = call(api, 'find_uobject', which == 'images' and 'Class /Script/UMG.Image' or 'Class /Script/UMG.UserWidget')
+        class = call(api, 'find_uobject', which == 'images' and 'Class /Script/UMG.Image' or'Class /Script/UMG.UserWidget')
         if which == 'images' then imageClass = class else userClass = class end
     end
-    return call(class, 'get_objects_matching', false)
+    local result=call(class, 'get_objects_matching', false)
+    return result
 end
 local function sortedCandidates(rows)
-    table.sort(rows,function(a,b)
-        local pa,pb=a.category=='portrait'and 1 or a.category=='playerstate-art-region'and 2 or 4,b.category=='portrait'and 1 or b.category=='playerstate-art-region'and 2 or 4
-        if pa~=pb then return pa<pb end
-        return a.name<b.name
-    end)
+    table.sort(rows,function(a,b)return a.name<b.name end)
     while #rows>128 do table.remove(rows)end
     return rows
 end
@@ -518,10 +632,10 @@ end
 -- absent, incomplete or asynchronously delivered. No stale roster is accepted.
 local fullDiscover=discover
 local sourceRequest,sourceReply=0,nil
-local function sourceImages()
+local function querySources(event,owner)
     sourceRequest=sourceRequest%999999999+1;sourceReply=nil
     local wanted=tostring(sourceRequest)
-    pcall(function()api:dispatch_custom_event('AC8_GlowDiscoveryRequest',wanted)end)
+    pcall(function()api:dispatch_custom_event(event,wanted..(owner and '|'..owner or ''))end)
     local reply=sourceReply;sourceReply=nil
     if not reply or reply.request~=wanted or reply.status~='ok'then
         S.sourceFallbacks=(S.sourceFallbacks or 0)+1;return
@@ -535,6 +649,21 @@ local function sourceImages()
     S.nativeSourceQueries=(S.nativeSourceQueries or 0)+1
     S.relevantSourceCount=#result
     return result
+end
+-- Prefer the current HUD's own trees. The native walk uses reflected ownership,
+-- rejects incomplete/stale links, and never scans the global Image population.
+-- Keep the existing roster as compatibility recovery (older DLLs/API/layouts).
+local function sourceImages(hud)
+    local owner=full(hud)
+    -- Ask the current bound trees first, including startup. The native service
+    -- retains the accepted portrait/radar masks; native ownership ABI readiness
+    -- alone cannot establish that native radar coverage reached the image.
+    -- The indexed compatibility request remains available if ownership fails.
+    if owner and not owner:find('|',1,true)then
+        local images=querySources('AC8_GlowOwnedDiscoveryRequest',owner)
+        if images then return images end
+    end
+    return querySources('AC8_GlowDiscoveryRequest')
 end
 -- Only policy-bearing images can require an additional viewport root. Walk
 -- those few reciprocal owner paths, not every UserWidget in the process.
@@ -565,7 +694,7 @@ local function sourceDiscover()
     if not rootName then
         S.root=nil;S.rootName=nil;S.roots={};S.candidates={};resetRectangleCache();return
     end
-    local images=sourceImages()
+    local images=sourceImages(hud)
     if not images then return fullDiscover()end
     S.root=root;S.rootName=rootName;S.roots={};frameChains={}
     local prefixes={}
@@ -694,8 +823,8 @@ local function buildPolicy()
         frameRootStamp=(size and size.X>0 and size.Y>0 and #S.candidates>0)and rootStamp(g,size)or nil
         if size and size.X>0 and size.Y>0 then
             for _,c in ipairs(S.candidates)do
-                if full(c.widget)==c.name then
-                    local usable=true
+                if full(c.widget)==c.name and chain(c.widget) then
+                    local usable=c.category=='portrait'or(currentAttachment(c.widget)and select(1,kind(c.name,c.widget))==c.category)
                     if c.category=='portrait' then
                         local brush=call(c.widget,'GetBrush') or call(c.widget,'get_property','Brush')
                         local resource=field(brush,'ResourceObject')
@@ -703,15 +832,7 @@ local function buildPolicy()
                         local alpha=field(color,'A')
                         usable=resource~=nil and (type(alpha)~='number' or alpha>0)
                     end
-                    local r
-                    if usable then
-                        if c.category=='playerstate-art-region'then r=artworkBounds(c.widget,g,size,c.inset)
-                        else r=bounds(c.widget,g,size,c.inset)end
-                    end
-                    if r and c.category=='playerstate-art-region'and
-                       (r[3]-r[1])*(r[4]-r[2])>0.25 then
-                        r=nil;S.artRegionRejected=(S.artRegionRejected or 0)+1
-                    end
+                    local r=usable and bounds(c.widget,g,size,c.inset,c.category~='portrait')or nil
                     if r then
                         add(r,c.flags,c.name,c.category)
 
@@ -759,7 +880,7 @@ uevr.sdk.callbacks.on_lua_event(function(name,data)
         if request~=tostring(sourceRequest)or(status~='ok'and status~='fallback')then return end
         local names={}
         for n in (tail or''):gmatch('|([^|]+)')do
-            if #names>=256 or not n:match('^Image ')then return end
+            if #names>=256 or not n:match('^[%w_]+ /Engine/Transient%.')then return end
             names[#names+1]=n
         end
         sourceReply={request=request,status=status,names=names};return

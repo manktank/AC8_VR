@@ -280,9 +280,10 @@ if previous then error('Cinematic Intent already registered; restart before relo
 local S={active=false,maskActive=false,guardForced=false,saved={},elapsed=0,version=26,lensRequested=true,
     authoredProjectionImplemented=false,automaticDetection=true,stereoSeparationUnmodified=true,gameplayExitHoldSeconds=0.25}
 _G.AC8_CinematicIntent=S
+local function invokeMethod(o,k,...)return o[k](o,...)end
 local function call(o,k,...)
     if not o then return false,'unavailable' end
-    return pcall(function(...) return o[k](o,...) end,...)
+    return pcall(invokeMethod,o,k,...)
 end
 local function value(o,k,...) local ok,v=call(o,k,...);if ok then return v end end
 local function full(o) return value(o,'get_full_name') end
@@ -379,6 +380,21 @@ local function camera()
         fov=value(pm,'GetFOVAngle'),componentFOV=prop(component,'FieldOfView'),
         aspectRatio=prop(component,'AspectRatio'),constrainAspect=prop(component,'bConstrainAspectRatio'),
         focalLength=prop(component,'CurrentFocalLength'),screenMode=mv(screen),missionMatchState=missionMatchState(pc)}
+end
+local function currentLens()
+    local pc=value(uevr.api,'get_player_controller',0)
+    if not R.isLiveObject(pc) then
+        pc=R.objectCall(value(uevr.api,'get_player_pawn'),'get_property','Controller')
+    end
+    local pm=R.objectCall(pc,'get_property','PlayerCameraManager')
+    local vt=R.objectCall(pc,'GetViewTarget') or R.objectCall(pm,'GetViewTarget')
+    local component=R.objectCall(vt,'get_property','CameraComponent')
+        or R.objectCall(vt,'get_property','CineCameraComponent')
+    if not component then
+        local cls=value(uevr.api,'find_uobject','Class /Script/Engine.CameraComponent')
+        if R.isLiveObject(cls) then component=R.objectCall(vt,'GetComponentByClass',cls) end
+    end
+    return R.objectCall(pm,'GetFOVAngle'),R.objectCall(component,'get_property','AspectRatio')
 end
 local function mask(on)
     local data=on and ('on|'..mv('UI_Size')..'|'..S.saved.UI_Distance) or 'off'
@@ -510,10 +526,10 @@ S.lensCallbackRegistered=pcall(function()
         if not S.shotOverridesActive or not (S.maskActive or S.hangarActive) then return end
         authoredPose()
         if not (S.maskActive or S.hangarUsesCinematicWindow) or not S.lensRequested then return end
-        local ok,row=pcall(camera)
-        if ok and type(row.fov)=='number' and type(row.aspectRatio)=='number' then
-            pcall(function()uevr.api:dispatch_custom_event('AC8_CinematicLens',tostring(row.fov)..'|'..tostring(row.aspectRatio))end)
-            S.renderLens={fov=row.fov,aspect=row.aspectRatio}
+        local ok,fov,aspect=pcall(currentLens)
+        if ok and type(fov)=='number' and type(aspect)=='number' then
+            pcall(function()uevr.api:dispatch_custom_event('AC8_CinematicLens',tostring(fov)..'|'..tostring(aspect))end)
+            S.renderLens={fov=fov,aspect=aspect}
         end
     end)
 end)

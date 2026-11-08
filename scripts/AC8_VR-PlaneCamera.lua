@@ -13,40 +13,48 @@ registry.sections.gameplay_camera=function(R)
  local uevr=R.host('camera','gameplay camera stabilization')
 local CAM_ANIM_KILL = true     
 local CAM_KILL_EVERY = 1       
+local function cam_local_pawn() return uevr.api:get_local_pawn(0) end
+local function cam_player_pawn() return uevr.api:get_player_pawn() end
+local function cam_index(o, k) return o[k] end
+local function cam_invoke(o, k, ...) return o[k](o, ...) end
+local function cam_player_controller(a)
+    if a.get_player_controller ~= nil then return a:get_player_controller() end
+end
 local function cam_get_pawn()
-    local ok, p = pcall(function() return uevr.api:get_local_pawn(0) end)
+    local ok, p = pcall(cam_local_pawn)
     if ok and p ~= nil then return p end
-    local ok2, p2 = pcall(function() return uevr.api:get_player_pawn() end)
+    local ok2, p2 = pcall(cam_player_pawn)
     if ok2 and p2 ~= nil then return p2 end
     return nil
 end
 
-local function cam_kill_anims()
-    local pm = nil
-    pcall(function()
-        local a = uevr and uevr.api
-        if a == nil then return end
-        local ctrl = nil
-        local pawn = cam_get_pawn()
-        if pawn ~= nil then
-            pcall(function() ctrl = pawn.Controller end)
-            if ctrl == nil then
-                pcall(function() ctrl = pawn:get_Controller() end)
-            end
-        end
+local function cam_find_manager()
+    local a = uevr and uevr.api
+    if a == nil then return nil end
+    local ctrl = nil
+    local pawn = cam_get_pawn()
+    if pawn ~= nil then
+        local ok, v = pcall(cam_index, pawn, 'Controller'); if ok then ctrl = v end
         if ctrl == nil then
-            pcall(function()
-                if a.get_player_controller ~= nil then ctrl = a:get_player_controller() end
-            end)
+            ok, v = pcall(cam_invoke, pawn, 'get_Controller'); if ok then ctrl = v end
         end
-        if ctrl == nil then return end
-        pcall(function() pm = ctrl.PlayerCameraManager end)
-        if pm == nil then pcall(function() pm = ctrl:get_PlayerCameraManager() end) end
-    end)
-    if pm == nil then return false end
+    end
+    if ctrl == nil then
+        local ok, v = pcall(cam_player_controller, a); if ok then ctrl = v end
+    end
+    if ctrl == nil then return nil end
+    local pm = nil
+    local ok, v = pcall(cam_index, ctrl, 'PlayerCameraManager'); if ok then pm = v end
+    if pm == nil then ok, v = pcall(cam_invoke, ctrl, 'get_PlayerCameraManager'); if ok then pm = v end end
+    return pm
+end
 
-    pcall(function() pm:StopAllCameraAnims(true) end)
-    pcall(function() pm:StopAllCameraShakes(true) end)
+local function cam_kill_anims()
+    local found, pm = pcall(cam_find_manager)
+    if not found or pm == nil then return false end
+
+    pcall(cam_invoke, pm, 'StopAllCameraAnims', true)
+    pcall(cam_invoke, pm, 'StopAllCameraShakes', true)
     return true
 end
 

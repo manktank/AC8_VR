@@ -1,4 +1,5 @@
 #pragma once
+#include "game-compatibility-runtime.h"
 #include <bcrypt.h>
 #include <vector>
 #include <string>
@@ -7,6 +8,9 @@
 
 namespace boundary {
 constexpr DWORD wrapper_rva=0x352a50, expected_timestamp=1790232505, expected_size=12853248;
+// This remaining fingerprint is for the private UEVRBackend wrapper below,
+// not AceCombat8.exe. It protects a separate loader ABI with a private offset;
+// changing game resources cannot invalidate it. Do not reuse it as a game gate.
 constexpr char expected_hash[]="70CCBAAF4C357DEAACC3990FD01A911A029D31DCCF0E5ABC01C7A9073E4F50C1";
 constexpr unsigned char signature[]={0x48,0x89,0x5c,0x24,0x18,0x57,0x48,0x81,0xec,0xb0,0,0,0,0x48,0x8b,0x05,0x1c,0x46,0x82,0,0x48,0x33,0xc4,0x48,0x89,0x84,0x24,0xa8,0,0,0,0x48};
 

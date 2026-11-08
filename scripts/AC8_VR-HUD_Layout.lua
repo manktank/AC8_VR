@@ -29,19 +29,34 @@ function simpleHUD.normalize(input)
         local p=type(input)=='table'and input[key]or nil
         local function axis(k)
             local v=type(p)=='table'and tonumber(p[k])or nil
-            return v and v==v and v>=-4000 and v<=4000 and v or(key=='fpm'and k=='x'and 10 or 0)
+            return v and v==v and v>=-4000 and v<=4000 and v or 0
         end
         out[key]={x=axis('x'),y=axis('y')}
+        if key=='mission'or key=='wingman'then
+            local scale=type(p)=='table'and tonumber(p.scale)or nil
+            out[key].scale=scale and scale==scale and scale>=.1 and scale<=3 and scale or 1
+        end
     end
     return out
 end
 simpleHUD.values=simpleHUD.normalize()
-function simpleHUD.missionMoved()
-    if simpleHUD.navigationActive and simpleHUD.navigationActive()then return true end
-    for _,key in ipairs({'mission','score','target','time'})do
-        local p=simpleHUD.values[key];if p and(p.x~=0 or p.y~=0)then return true end
-    end
-    return false
+function simpleHUD.scale(key)
+    local p=simpleHUD.values[key]
+    return p and p.scale or 1
+end
+-- Neutral HUD defaults. Legacy coordinate layouts remain saved but are not applied.
+-- Newly saved layouts carry coordinateRevision=2 and restore normally.
+function simpleHUD.baselineLayout()
+    local layout={coordinateRevision=2,weaponCalibration={saamScale=1,bombFov=12.5,bombY=0},groups={},components={},simpleGroups=simpleHUD.normalize(),
+        canvas={enabled=false,x=0,y=0,scale=1,extraWidth=0,extraHeight=0,inheritClip=false}}
+    for _,key in ipairs({'ladder','radar','info'})do layout.groups[key]={enabled=true,x=0,y=0,scale=1}end
+    return layout
+end
+simpleHUD.weapon={saamScale=1,bombFov=12.5,bombY=0}
+function simpleHUD.weaponValues(v)
+    v=type(v)=='table'and v or{}
+    local function number(key,default,low,high)local n=tonumber(v[key]);return n and n==n and n>=low and n<=high and n or default end
+    return{saamScale=number('saamScale',1,.25,2),bombFov=number('bombFov',12.5,-40,40),bombY=number('bombY',0,-4000,4000)}
 end
 function simpleHUD.targetCalibration(v)
     if type(v)~='table'or type(v.scope)~='string'then return nil end
@@ -56,10 +71,11 @@ function simpleHUD.offset(keys)
     for _,key in ipairs(keys)do local p=simpleHUD.values[key];if p then x=x+p.x;y=y+p.y end end
     return x,y
 end
+local function invokeInventory(o,k,...)if AC8Runtime.inventory then return AC8Runtime.inventory.call(o,k,...)end;return o[k](o,...)end
 local function simpleCall(o,k,...)
     local R=rawget(_G,'AC8Runtime')
     if not o or(o~=uevr.api and(not R or not R.isLiveObject(o)))then return end
-    local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end
+    local ok,v=pcall(invokeInventory,o,k,...);if ok then return v end
 end
 local function simpleXY(v)
     local ok,x,y=pcall(function()return v.X,v.Y end)
@@ -127,7 +143,17 @@ end
 local function inheritedScale()return 1 end
 local function renderMap(o,inherited)
     local slate,rg,size,root=rootGeometry();local cached=simpleHUD.navigationBases[o]
-    if cached and cached.root==root and size and cached.width==size.X and cached.height==size.Y then return cached end
+    -- Root size can remain fixed while a parent is re-scaled or re-laid out.
+    -- Validate the current parent basis before reusing a local movement map.
+    local parent=simpleCall(o,'GetParent');local pg=simpleGeometry(parent)
+    local a=rootPoint(slate,rg,pg,{X=0,Y=0})
+    local px=rootPoint(slate,rg,pg,{X=1,Y=0});local py=rootPoint(slate,rg,pg,{X=0,Y=1})
+    local ps=simpleXY(simpleCall(slate,'GetLocalSize',pg))
+    local own=simpleXY(simpleCall(slate,'GetLocalSize',simpleGeometry(o)))
+    local fingerprint=a and px and py and ps and own and{a.X,a.Y,px.X-a.X,px.Y-a.Y,py.X-a.X,py.Y-a.Y,ps.X,ps.Y,own.X,own.Y}
+    local same=fingerprint and cached and cached.parent==parent and cached.fingerprint
+    if same then for i,v in ipairs(fingerprint)do if math.abs(v-cached.fingerprint[i])>.0001 then same=false;break end end end
+    if same and cached.root==root and size and cached.width==size.X and cached.height==size.Y then return cached end
     local origin,paint,dimensions,owner,g=paintBasis(o);if not origin then return end
     local rt=simpleCall(o,'get_property','RenderTransform');local ok,t,scale,angle,shear=pcall(function()
         return simpleXY(rt.Translation),simpleXY(rt.Scale),tonumber(rt.Angle)or 0,simpleXY(rt.Shear)
@@ -147,15 +173,42 @@ local function renderMap(o,inherited)
     b.cx=localSize.X/2;b.cy=localSize.Y/2
     b.lx=origin.X-b.xx*(t.X+b.px-scale.X*b.px)-b.xy*(t.Y+b.py-scale.Y*b.py)
     b.ly=origin.Y-b.yx*(t.X+b.px-scale.X*b.px)-b.yy*(t.Y+b.py-scale.Y*b.py)
+    b.parent=parent;b.fingerprint=fingerprint
     simpleHUD.navigationBases[o]=b;return b
+end
+function simpleHUD.renderVector(o,x,y)
+    if x==0 and y==0 then return 0,0 end
+    local b=renderMap(o,false);if not b then return end
+    return inverseVector(b,x,y)
 end
 function simpleHUD.renderOffset(o,keys,inherited)
     local x,y=simpleHUD.offset(keys);if x==0 and y==0 then return{X=0,Y=0}end
     local b=renderMap(o,inherited);if not b then return end
     local dx,dy=inverseVector(b,x,y);return dx and{X=dx,Y=dy}
 end
+
 function simpleHUD.prepareLadder(o)
     if AC8Runtime.isLiveObject(o)then simpleHUD.ladder=o end
+end
+-- 1920,1080 is the centre of the authored 3840x2160 HUD, not every live
+-- canvas. A maximized 2560x1338 window has a 4132.735x2160 logical canvas:
+-- retaining 1920 places the ladder/FPM about 91 physical pixels left.
+-- Use the parent's logical size only. Retainer paint positions can lag our
+-- writes and must never feed back into an alignment correction. Manual offsets
+-- remain additive, and the existing FPM slot/pivot calculation follows this pose.
+-- Share the bounded size read across application/readback in the same HUD tick.
+simpleHUD.ladderSizes=setmetatable({},{__mode='k'})
+function simpleHUD.ladderPosition(o,x,y)
+    local R=rawget(_G,'AC8Runtime');local cached=simpleHUD.ladderSizes[o]
+    if not R or not R.isLiveObject(o)then return end
+    if not cached or cached.tick~=R.tick or cached.root~=R.context.root then
+        local parent=simpleCall(o,'GetParent')
+        local size=simpleXY(simpleCall(simpleSlate(),'GetLocalSize',simpleGeometry(parent)))
+        if not size or size.X<=0 or size.Y<=0 or size.X>=math.huge or size.Y>=math.huge then return end
+        cached={tick=R.tick,root=R.context.root,x=size.X/2-1920,y=size.Y/2-1080}
+        simpleHUD.ladderSizes[o]=cached
+    end
+    return x+cached.x,y+cached.y
 end
 local function fpmCanvasLayout(o,parentSize)
     local slot=simpleCall(o,'get_property','Slot')
@@ -179,6 +232,32 @@ local function fpmCanvasLayout(o,parentSize)
     local pivot=simpleXY(simpleCall(o,'get_property','RenderTransformPivot'))or simpleXY(simpleCall(o,'GetRenderTransformPivot'))or{X=0,Y=0}
     return{x=parentSize.X*minimum.X+left-(stretchX and 0 or alignment.X*width),
         y=parentSize.Y*minimum.Y+top-(stretchY and 0 or alignment.Y*height),w=width,h=height,px=pivot.X*width,py=pivot.Y*height}
+end
+-- Gun/FPM reset positions were confirmed on the authored 3840x2160 canvas.
+-- Keep that exact pose at 1080p (and any DPI scale with the same logical size).
+-- Elsewhere, move the baseline by the parent-centre change, less the movement
+-- already supplied by this widget's slot anchors, size and render pivot/scale.
+-- Adding half the viewport difference alone would double-move centred slots.
+-- Read current slot data, never the widget's stale painted position. These
+-- bounded reads run only at the existing reset/initialization opportunities.
+function simpleHUD.resetCenter(o,x,y,wantedScale)
+    local parent=simpleCall(o,'GetParent')
+    local size=simpleXY(simpleCall(simpleSlate(),'GetLocalSize',simpleGeometry(parent)))
+    if not size or size.X<=0 or size.Y<=0 or size.X>=math.huge or size.Y>=math.huge then return end
+    if size.X==3840 and size.Y==2160 then return x,y end
+    local current=fpmCanvasLayout(o,size)
+    local reference=fpmCanvasLayout(o,{X=3840,Y=2160})
+    local rt=simpleCall(o,'get_property','RenderTransform')
+    local ok,scale,angle,shear=pcall(function()
+        return simpleXY(wantedScale or rt.Scale),tonumber(rt.Angle)or 0,simpleXY(rt.Shear)
+    end)
+    if not current or not reference or not ok or not scale or math.abs(angle)>1e-6 or shear and(math.abs(shear.X)>1e-6 or math.abs(shear.Y)>1e-6)then return end
+    local dx=current.x+current.px+scale.X*(current.w/2-current.px)
+        -(reference.x+reference.px+scale.X*(reference.w/2-reference.px))
+    local dy=current.y+current.py+scale.Y*(current.h/2-current.py)
+        -(reference.y+reference.py+scale.Y*(reference.h/2-reference.py))
+    local tx,ty=x+(size.X-3840)/2-dx,y+(size.Y-2160)/2-dy
+    if tx==tx and ty==ty and math.abs(tx)<math.huge and math.abs(ty)<math.huge then return tx,ty end
 end
 function simpleHUD.fpmPose(o,x,y,scale)
     local ladder=simpleHUD.ladder
@@ -221,18 +300,18 @@ do
 (function(uevr,json,print)
 
 
-local CANVAS_X,  CANVAS_Y     = 1200, 350     
-local TW_X,      TW_Y         = -35, -55      
-local WHISKY_X,  WHISKY_Y     = 10, 6         
-local VELOCITY_X, VELOCITY_Y  = -1227, -400   
+local CANVAS_X,  CANVAS_Y     = 0, 0     
+local TW_X,      TW_Y         = 0, 0      
+local WHISKY_X,  WHISKY_Y     = 0, 0         
+local VELOCITY_X, VELOCITY_Y  = 0, 0   
 
-local VELOCITY_NUDGE_X, VELOCITY_NUDGE_Y = 6, -46
+local VELOCITY_NUDGE_X, VELOCITY_NUDGE_Y = 0, 0
 
 local MAIN_X,    MAIN_Y       = 0, 0
 local TACH_PULL, TACH_Y       = 0, 0
 local RADAR_CIRCLE_DY         = 0 -- Mortem: keep circle/compass aligned with the minimap renderer.           
 
-local VICON_BASE_X,      VICON_BASE_Y      = 1920, 1087
+local VICON_BASE_X,      VICON_BASE_Y      = 1920, 1080
 local GUNRETICLE_BASE_X, GUNRETICLE_BASE_Y = 1920, 1080
 
 local SHIFT_VIA_PERSISTENT = true
@@ -240,7 +319,7 @@ local FIX_RADAR_CIRCLE     = true
 local SINGLE_INSTANCE      = true
 
 local RESET_LIST = {
-    { key = "GunReticle",           pat = "GunReticle",           x = 1920, y = 1080 },
+    { key = "GunReticle",           pat = "GunReticle",           x = 1920, y = 1080, relativeCenter = true },
     { key = "Seeker",               pat = "Seeker",               x = 0,    y = 0    },
     { key = "Locator",              pat = "Locator",              x = 0,    y = 0    },
     { key = "ExplosivePredication", pat = "ExplosivePredication", x = -TW_X, y = -TW_Y },
@@ -289,7 +368,7 @@ local K_FALLBACK = {
 
 local function p(obj)
     if obj == nil then return "<nil>" end
-    local ok, v = pcall(function() return obj:get_full_name() end)
+    local ok, v = pcall(function() return AC8Runtime.objectCall(obj,'get_full_name') end)
     if not ok or v == nil then return "<no full_name>" end
     return v
 end
@@ -298,9 +377,10 @@ local function short_name(obj)
     if type(nm) == "string" then return nm:match("([^%.%/]+)$") or nm end
     return "<?>"
 end
+local function readField(o,k)return o[k]end
 local function get_field(obj, name)
     if obj == nil then return nil end
-    local ok, v = pcall(function() return obj[name] end)
+    local ok, v = pcall(readField,obj,name)
     if not ok then return nil end
     return v
 end
@@ -334,6 +414,7 @@ local function set_rt(obj, tx, ty, tag, quiet)
     return true
 end
 local function iter_children(w)
+    if AC8Runtime.inventory then return AC8Runtime.inventory.children(w)or{}end
     local children = {}
     if w == nil then return children end
     local okc, cc = pcall(function() return w.GetChildrenCount and w:GetChildrenCount() or 0 end)
@@ -385,7 +466,7 @@ local function all_userwidgets()
     if uevr == nil or uevr.api == nil then return {} end
     local umg = uevr.api:find_uobject("Class /Script/UMG.UserWidget")
     if umg == nil then return {} end
-    local ok, objs = pcall(function() return umg:get_objects_matching(false) end)
+    local ok, objs = pcall(function() return AC8Runtime.inventory.objects(umg,false) end)
     if not ok or type(objs) ~= "table" then return {} end
     return objs
 end
@@ -402,20 +483,13 @@ local function all_mainflights(uw)
 end
 
 local function abs_center(w)
-    if w == nil then return nil end
-    for _, fn in ipairs({ "GetPaintSpaceGeometry", "GetCachedGeometry", "GetTickSpaceGeometry" }) do
-        local ok, geo = pcall(function() return w[fn](w) end)
-        if ok and geo ~= nil then
-            local ap = get_field(geo, "AbsolutePosition")
-            local sz = get_field(geo, "Size")
-            local ax, ay = get_field(ap, "X"), get_field(ap, "Y")
-            local sx, sy = get_field(sz, "X"), get_field(sz, "Y")
-            if type(ax) == "number" and type(ay) == "number"
-               and type(sx) == "number" and type(sy) == "number" and sx > 0 and sy > 0 then
-                return { x = ax + sx / 2, y = ay + sy / 2, via = fn }
-            end
-        end
-    end
+    -- Calibration constants are authored HUD-local units. A physical absolute
+    -- origin plus an unscaled local Size/2 is not a valid center under DPI.
+    local slate,rootGeo,rootSize=rootGeometry()
+    local g=simpleGeometry(w);local size=simpleXY(simpleCall(slate,'GetLocalSize',g))
+    if not rootSize or not size or size.X<=0 or size.Y<=0 then return nil end
+    local center=rootPoint(slate,rootGeo,g,{X=size.X/2,Y=size.Y/2})
+    if center then return{x=center.X,y=center.Y,via='current HUD-root geometry'}end
     return nil
 end
 
@@ -423,7 +497,7 @@ local function pawn_full_name()
     if uevr == nil or uevr.api == nil or uevr.api.get_player_pawn == nil then return nil end
     local ok, pawn = pcall(function() return uevr.api:get_player_pawn() end)
     if not ok or pawn == nil then return nil end
-    local ok2, nm = pcall(function() return pawn:get_full_name() end)
+    local ok2, nm = pcall(function() return AC8Runtime.objectCall(pawn,'get_full_name') end)
     if ok2 and type(nm) == "string" then return nm end
     return nil
 end
@@ -518,6 +592,7 @@ local function sweep_residual(quiet)
 end
 
 local function match_tach_k()
+    TACH_KX,TACH_KY=0,0;TACH_K_MATCH="Clean HUD baseline";do return end
     if TACH_K_LOCKED then
         TACH_K_MATCH = string.format("AC8 layout value=%d, value=%d", TACH_KX, TACH_KY)
         return
@@ -558,16 +633,26 @@ local function collect_radar(root)
     return out
 end
 
+local function pin_position(pin)
+    if pin.relativeCenter then
+        local x,y=simpleHUD.resetCenter(pin.obj,pin.x,pin.y)
+        -- An unarranged parent is not evidence for a fixed-centre fallback.
+        -- Retry via the existing ordinary pin check; add no new timer or scan.
+        pin.centerPending=x==nil or y==nil
+        return x,y
+    end
+    return pin.x,pin.y
+end
 local function assert_pins(slow)
     local n = 0
     for _, pin in ipairs(C.pins) do
-        if pin.obj ~= nil and (slow or not pin.slow) then
-            local x, y = pin.x, pin.y
+        if pin.obj ~= nil and (slow or not pin.slow or pin.centerPending) then
+            local x, y = pin_position(pin)
             if pin.dyn then x = R0_X + cal.kx; y = R0_Y + cal.ky end
             local cx, cy = get_rt_xy(pin.obj)
-            local okx = (type(cx) == "number" and math.abs(cx - x) < 1)
-            local oky = (type(cy) == "number" and math.abs(cy - y) < 1)
-            if not (okx and oky) then
+            local okx = (type(cx) == "number" and x~=nil and math.abs(cx - x) < 1)
+            local oky = (type(cy) == "number" and y~=nil and math.abs(cy - y) < 1)
+            if x~=nil and y~=nil and not (okx and oky) then
                 fast_rt(pin.obj, x, y)
             end
             n = n + 1
@@ -611,85 +696,12 @@ end
 
 local function cal_step()
     if not cal.active then return true end
-    
-    if cal.warm > 0 then
-        cal.warm = cal.warm - 1
-        return false
-    end
-    if FORCE_K_X ~= 0 or FORCE_K_Y ~= 0 then
-        cal.kx, cal.ky = FORCE_K_X, FORCE_K_Y
-        cal.active = false
-        
-        assert_pins(true)   
-        return true
-    end
-    if C.ts == nil or C.ta == nil or C.radar_main == nil then
-        return cal_use_fallback("AC8 layout", cal.cur_fp)
-    end
-    local a  = abs_center(C.ts)
-    local b  = abs_center(C.ta)
-    local an = abs_center(C.radar_main)
-    if a == nil or b == nil or an == nil then
-
-        cal.fail = cal.fail + 1
-        if cal.fail == 1 then
-            
-        end
-        if cal.fail >= CAL_FAIL_MAX then
-            cal.active = false
-            
-        end
-        return false
-    end
-    cal.fail = 0
-    
-    if cal.scale == nil then
-        if math.abs(an.x - ANCHOR_EXP_X) <= SCALE_TOL and math.abs(an.y - ANCHOR_EXP_Y) <= SCALE_TOL then
-            cal.scale = 1
-        elseif math.abs(an.x - ANCHOR_EXP_X / 2) <= SCALE_TOL / 2
-           and math.abs(an.y - ANCHOR_EXP_Y / 2) <= SCALE_TOL / 2 then
-            cal.scale = 2   
-        else
-            
-            return cal_use_fallback("AC8 layout", cal.cur_fp)
-        end
-        
-    end
-    local s = cal.scale
-    local mx = (a.x + b.x) / 2 * s
-    local my = (a.y + b.y) / 2 * s
-    local ax = an.x * s
-    local ay = an.y * s
-    local ex = (mx - ax) - DESIGN_DX
-    local ey = (my - ay) - DESIGN_DY
-
-    if math.abs(ex) < TOL_UNITS and math.abs(ey) < TOL_UNITS then
-        cal.active = false
-        
-        return true
-    end
-    if math.abs(cal.kx) > K_MAX or math.abs(cal.ky) > K_MAX then
-        return cal_use_fallback("AC8 layout", cal.cur_fp)
-    end
-    cal.iter = cal.iter + 1
-    if cal.iter > CAL_MAX_ITER then
-        return cal_use_fallback("AC8 layout", cal.cur_fp)
-    end
-    
-    if cal.pex ~= nil and cal.pey ~= nil then
-        local pe = math.max(math.abs(cal.pex), math.abs(cal.pey))
-        local ne = math.max(math.abs(ex), math.abs(ey))
-        if ne > pe * 1.05 and cal.gain > 0.06 then
-            cal.gain = cal.gain / 2
-            
-        end
-    end
-    cal.kx = cal.kx - cal.gain * ex
-    cal.ky = cal.ky - cal.gain * ey
-    cal.pex, cal.pey = ex, ey
-    assert_pins(true)   
-    
-    return false
+    -- Keep the existing authored local placement and the user's saved layout.
+    -- Radar and instrument paint geometry can refer to different retainer
+    -- frames; using their centers as a reference displaced the entire ladder.
+    cal.kx,cal.ky=0,0
+    cal.active=false;cal.lastSample=nil
+    return true
 end
 
 local function retry_missing()
@@ -701,7 +713,8 @@ local function retry_missing()
             local w = find_desc(C.wtsc, it.pat, 12)
             if w ~= nil then
                 pin.obj = w
-                fast_rt(w, it.x, it.y)
+                local x,y=pin_position(pin)
+                if x~=nil and y~=nil then fast_rt(w, x, y)end
                 
             end
         end
@@ -718,7 +731,7 @@ local effect_text_originals={}
 local effect_text_rows={}
 local function effect_material_name(material)
     if material==nil then return "None" end
-    local ok,name=pcall(function() return material:get_full_name() end)
+    local ok,name=pcall(function() return AC8Runtime.objectCall(material,'get_full_name') end)
     return ok and name or "Material reference unavailable"
 end
 local function effect_poll()
@@ -734,7 +747,7 @@ end
 local function effect_text_apply()
     local root=C.keep
     if not root then effect_text_rows={};return end
-    local prefix=root:get_full_name():match("%s(.+)$")
+    local prefix=AC8Runtime.objectCall(root,'get_full_name'):match("%s(.+)$")
     if not prefix then return end
     if not effect_bright_ladder and not effect_bright_weapons and not effect_bright_all and not next(effect_text_originals) then
         effect_text_rows={};return
@@ -742,9 +755,9 @@ local function effect_text_apply()
     local cls=uevr.api:find_uobject("Class /Script/UMG.Widget")
     if not cls then return end
     local rows={}
-    for _,o in ipairs(cls:get_objects_matching(false) or {}) do
+    for _,o in ipairs(AC8Runtime.inventory.objects(cls,false) or {}) do
         local ok,err=pcall(function()
-            local full=o:get_full_name();local path=full:match("%s(.+)$")
+            local full=AC8Runtime.objectCall(o,'get_full_name');local path=full:match("%s(.+)$")
             if not path or path:sub(1,#prefix+1)~=prefix.."." then return end
             local leaf=path:match("([^.]+)$")
             local group=nil
@@ -776,7 +789,7 @@ local function effect_text_apply()
 end
 local function effect_apply(blur)
     if not blur then return end
-    local name=blur:get_full_name()
+    local name=AC8Runtime.objectCall(blur,'get_full_name')
     local base=effect_originals[name]
     if not base then
         local ok,material=pcall(function() return blur:get_property("EffectMaterial") end)
@@ -845,10 +858,10 @@ local function discover()
         pcall(function() inv = mf:IsInViewport() end)
         if inv == true then keep = mf; keep_addr = tostring(mf); break end
     end
-    if AC8Runtime.context.rootName:match('^WBP_HUD_Chronicle_MainFlight_000_C ') then keep=AC8Runtime.context.root;keep_addr=tostring(keep);pcall(function()if not keep:IsInViewport()then keep:AddToViewport()end end)end
+    if AC8Runtime.context.rootName:match('^WBP_HUD_Chronicle_MainFlight_000_C ') then keep=AC8Runtime.context.root;keep_addr=tostring(keep);pcall(function()if not keep:IsInViewport()then AC8Runtime.inventory.call(keep,'AddToViewport')end end)end
     if keep == nil then
         keep = mfs[1]; keep_addr = tostring(mfs[1])
-        pcall(function() keep:AddToViewport() end)
+        pcall(function() AC8Runtime.inventory.call(keep,'AddToViewport') end)
     end
     if #mfs > 1 and SINGLE_INSTANCE then
         for _, mf in ipairs(mfs) do
@@ -922,12 +935,13 @@ local function discover()
     if C.ta     ~= nil then table.insert(C.pins, { obj = C.ta,     x = -TACH_PULL + TACH_KX + TACH_NUDGE_X, y = TACH_Y + TACH_KY + TACH_NUDGE_Y, tag = "AC8 layout" }) end
     for _, it in ipairs(RESET_LIST) do
         local w = find_desc(wtsc, it.pat, 12)
-        table.insert(C.pins, { obj = w, x = it.x, y = it.y, tag = "RESET:" .. it.key, slow = true })
+        table.insert(C.pins, { obj = w, x = it.x, y = it.y, relativeCenter=it.relativeCenter, tag = "RESET:" .. it.key, slow = true })
     end
 
     for _, pin in ipairs(C.pins) do
         if pin.obj ~= nil and not pin.dyn then
-            set_rt(pin.obj, pin.x, pin.y, pin.tag, false)
+            local x,y=pin_position(pin)
+            if x~=nil and y~=nil then set_rt(pin.obj, x, y, pin.tag, false)end
         end
     end
     if C.cp ~= nil and SHIFT_VIA_PERSISTENT then
@@ -962,13 +976,8 @@ local function discover()
     end
 
     cal.kx, cal.ky = 0, 0
-    local fkx, fky = fallback_k(cal.cur_fp)
-    if fkx ~= nil then
-        cal.kx, cal.ky = fkx, fky
-        
-    end
     cal.gain = CAL_GAIN0; cal.iter = 0; cal.scale = nil; cal.pex = nil; cal.pey = nil
-    cal.warm = 3
+    cal.lastSample=nil;cal.warm = 3
     cal.active = true
     assert_pins(true)   
 
@@ -981,7 +990,7 @@ end
 local function validate()
     for _, e in ipairs({ C.keep, C.base, C.wtsc, C.cp }) do
         if e ~= nil then
-            local ok, v = pcall(function() return e:get_full_name() end)
+            local ok, v = pcall(function() return AC8Runtime.objectCall(e,'get_full_name') end)
             if not ok or v == nil or v == "<no full_name>" then
                 
                 C.ready = false
@@ -1004,10 +1013,8 @@ local function fingerprint_check()
         
         cal.cur_fp = nm
         cal.kx, cal.ky = 0, 0
-        local fkx, fky = fallback_k(nm)
-        if fkx ~= nil then cal.kx, cal.ky = fkx, fky end
         cal.gain = CAL_GAIN0; cal.iter = 0; cal.scale = nil; cal.pex = nil; cal.pey = nil
-        cal.warm = 3
+        cal.lastSample=nil;cal.warm = 3
         cal.active = true
         assert_pins()
     end
@@ -1147,9 +1154,9 @@ local TARGETS = {
         },
 
         sublabel = "Heading",
-        x = 690.0, y = 756.0, active = true,  op = 1.0, sc = 1.0,
+        x = 1920.0, y = 1080.0, active = true,  op = 1.0, sc = 1.0,
         
-        sdx = -1913.0, sdy = -1200.0,
+        sdx = -1920.0, sdy = -1080.0,
     },
     {
 
@@ -1219,8 +1226,14 @@ local RESCAN_EVERY = 1800
 local CFG_FILE = "AC8_VR-Ladder.json"
 local dirty, save_msg = false, ""
 
+local function readField(o,k)return o[k]end
 local function call(obj, fn, ...)
-    local ok, f = pcall(function() return obj[fn] end)
+    local I=AC8Runtime.inventory
+    if I and I.handles(fn,select(1,...))then
+        local value=I.call(obj,fn,...);if value~=nil then return value end
+    end
+    if I and I.mutates(fn)then I.invalidate(fn)end
+    local ok, f = pcall(readField,obj,fn)
     if ok and f ~= nil then
         local ok2, r = pcall(f, obj, ...)
         if ok2 then return r end
@@ -1234,7 +1247,7 @@ local function call(obj, fn, ...)
 end
 
 local function full_name(o)
-    local ok, s = pcall(function() return o:get_full_name() end)
+    local ok, s = pcall(function() return AC8Runtime.objectCall(o,'get_full_name') end)
     if ok and type(s) == "string" then return s end
     return nil
 end
@@ -1251,9 +1264,12 @@ local function path_of(o)
     return s:match("^%S+%s+(.*)$") or s
 end
 
+local RT_XN, RT_YN = { "X", "x" }, { "Y", "y" }
+local function rt_index(o, k) return o[k] end
+local function rt_read(o) return o:get_property("RenderTransform") end
 local function num_field(o, names)
     for _, n in ipairs(names) do
-        local ok, v = pcall(function() return o[n] end)
+        local ok, v = pcall(rt_index, o, n)
         if ok and type(v) == "number" then return v end
     end
     return nil
@@ -1261,20 +1277,31 @@ end
 
 local function get_rt_xy(obj)
     if not AC8Runtime.isLiveObject(obj)then return nil,nil end
-    local ok1, rt = pcall(function() return obj:get_property("RenderTransform") end)
+    local ok1, rt = pcall(rt_read, obj)
     if not ok1 or rt == nil then return nil, nil end
-    local ok2, tr = pcall(function() return rt.Translation end)
+    local ok2, tr = pcall(rt_index, rt, "Translation")
     if not ok2 or tr == nil then return nil, nil end
-    return num_field(tr, { "X", "x" }), num_field(tr, { "Y", "y" })
+    return num_field(tr, RT_XN), num_field(tr, RT_YN)
 end
 
 local function get_rt_scale(obj)
     if not AC8Runtime.isLiveObject(obj)then return nil,nil end
-    local ok1, rt = pcall(function() return obj:get_property("RenderTransform") end)
+    local ok1, rt = pcall(rt_read, obj)
     if not ok1 or rt == nil then return nil, nil end
-    local ok2, sc = pcall(function() return rt.Scale end)
+    local ok2, sc = pcall(rt_index, rt, "Scale")
     if not ok2 or sc == nil then return nil, nil end
-    return num_field(sc, { "X", "x" }), num_field(sc, { "Y", "y" })
+    return num_field(sc, RT_XN), num_field(sc, RT_YN)
+end
+local function get_rt_all(obj)
+    if not AC8Runtime.isLiveObject(obj)then return nil,nil,nil,nil end
+    local ok1, rt = pcall(rt_read, obj)
+    if not ok1 or rt == nil then return nil,nil,nil,nil end
+    local x, y, sx, sy
+    local ok2, tr = pcall(rt_index, rt, "Translation")
+    if ok2 and tr ~= nil then x, y = num_field(tr, RT_XN), num_field(tr, RT_YN) end
+    local ok3, sc = pcall(rt_index, rt, "Scale")
+    if ok3 and sc ~= nil then sx, sy = num_field(sc, RT_XN), num_field(sc, RT_YN) end
+    return x, y, sx, sy
 end
 
 local SEARCH_CLASSES = {}
@@ -1300,10 +1327,10 @@ local function find_all_by_name(node_names)
 
     local seen = {}
     for _, cls in ipairs(SEARCH_CLASSES) do
-        local ok, arr = pcall(function() return cls:get_objects_matching(false) end)
+        local ok, arr = pcall(function() return AC8Runtime.inventory.objects(cls,false) end)
         if ok and type(arr) == "table" then
             for _, w in ipairs(arr) do
-                local okn, nm = pcall(function() return w:get_full_name() end)
+                local okn, nm = pcall(function() return AC8Runtime.objectCall(w,'get_full_name') end)
                 if okn and type(nm) == "string"
                     and nm:find("/Engine/Transient", 1, true)
                     and nm:find(SCOPE, 1, true)      
@@ -1353,14 +1380,14 @@ end
 
 local function find_by_walk(from_patterns, node_names)
     if UW == nil then return nil, {} end
-    local ok, arr = pcall(function() return UW:get_objects_matching(false) end)
+    local ok, arr = pcall(function() return AC8Runtime.inventory.objects(UW,false) end)
     if not ok or type(arr) ~= "table" then return nil, {} end
 
     local want_node = {}
     for _, n in ipairs(node_names) do want_node[n] = true end
 
     for _, w in ipairs(arr) do
-        local okn, nm = pcall(function() return w:get_full_name() end)
+        local okn, nm = pcall(function() return AC8Runtime.objectCall(w,'get_full_name') end)
         if okn and type(nm) == "string" and nm:find("/Engine/Transient", 1, true) then
             local hit_from = false
             for _, p in ipairs(from_patterns) do
@@ -1453,6 +1480,12 @@ local function restore(e)
     end
 end
 
+local function target_position(t,e)
+    local x=t.x+(e.sub and(t.sdx or 0)or 0)
+    local y=t.y+(e.sub and(t.sdy or 0)or 0)
+    if t.key=='ladder'and not e.sub then return simpleHUD.ladderPosition(e.o,x,y)end
+    return x,y
+end
 local function apply_one(t)
     if not gameplay(AC8Runtime)or t.items == nil then return end
 
@@ -1478,13 +1511,11 @@ local function apply_one(t)
 
         if not t.nopos then
             
-            local ox, oy = 0.0, 0.0
-            if e.sub then ox, oy = t.sdx or 0.0, t.sdy or 0.0 end
-            local tx, ty = t.x + ox, t.y + oy
+            local tx, ty = target_position(t,e)
 
             local cx, cy = get_rt_xy(o)
             
-            if not (type(cx) == "number" and math.abs(cx - tx) < 1
+            if tx and ty and not (type(cx) == "number" and math.abs(cx - tx) < 1
                     and type(cy) == "number" and math.abs(cy - ty) < 1) then
                 pcall(function() o:SetRenderTranslation({ X = tx, Y = ty }) end)
             end
@@ -1550,6 +1581,7 @@ local function apply_cfg_entry(tg, v)
 end
 
 local function read_cfg()
+    do return nil end -- TEMP baseline: legacy layout file stays on disk.
     if not HAS_JSON then return nil end
     local ok, t = pcall(function() return json.load_file(CFG_FILE) end)
     if not ok or type(t) ~= "table" then return nil end
@@ -1806,7 +1838,7 @@ local ws_ui_dirty=false
 local ws_ui_message=''
 hudProfiles=AC8Runtime.aircraftPresets or AC8Runtime.hudDefaults:view()
 local function profileSnapshot()
-    return{groups=WS.groups,components=WS.components,canvas=WS.canvas,simpleGroups=WS.simple,simpleTargetBase=simpleHUD.targetBase}
+    return{coordinateRevision=2,weaponCalibration=simpleHUD.weapon,groups=WS.groups,components=WS.components,canvas=WS.canvas,simpleGroups=WS.simple,simpleTargetBase=simpleHUD.targetBase}
 end
 local function applyHUDProfile(layout,source)
     local cmd=hudProfiles.copy(layout);hudProfiles.serial=(hudProfiles.serial or 0)+1
@@ -1824,9 +1856,7 @@ local function queueProfileAction(kind,value)
     hudProfiles.pending={kind=kind,layout=hudProfiles.copy(profileSnapshot()),value=value}
 end
 local function updateHUDProfiles()
-    local initial={groups={},components={},simpleGroups=simpleHUD.normalize()}
-    for _,key in ipairs({'ladder','radar','info'})do initial.groups[key]={enabled=false,x=0,y=0,scale=1}end
-    if not hudProfiles:init(initial)then return end
+    if not hudProfiles:init(hudProfiles.db==nil and simpleHUD.baselineLayout()or nil)then return end
     local plane=profilePlane();hudProfiles.currentPlane=plane
     if not AC8Runtime.aircraftPresets then
         local action=hudProfiles.pending;hudProfiles.pending=nil
@@ -1840,6 +1870,7 @@ local function updateHUDProfiles()
     local selection=tostring(hudProfiles.db.perPlaneEnabled)..':'..mode..':'..(plane or'none')
     if hudProfiles.force or(hudProfiles.selection~=selection and(plane or mode=='all'))then
         local layout,source=hudProfiles:selected(plane)
+        if not layout or layout.coordinateRevision~=2 then layout=simpleHUD.baselineLayout();source='Neutral defaults (legacy HUD layout retained)'end
         if layout then applyHUDProfile(layout,source);hudProfiles.selection=selection;hudProfiles.force=false end
     end
 end
@@ -1858,7 +1889,7 @@ drawHUDProfiles=function()
     if imgui.button('Reset HUD to saved layout')then queueProfileAction('reset')end
     if hudProfiles.message then imgui.text(hudProfiles.message)end
 end
-AC8Runtime.hudLayoutControls={snapshot=function()return hudProfiles.copy(profileSnapshot())end,saved=function()ws_ui_dirty=false;ws_ui_message=''end}
+AC8Runtime.hudLayoutControls={snapshot=function()return hudProfiles.copy(profileSnapshot())end,saved=function()ws_ui_dirty=false;ws_ui_message=''end,changed=function()ws_ui_dirty=true end}
 
 local function ws_ui_sync()
     for _,t in ipairs(TARGETS)do
@@ -1873,77 +1904,93 @@ workshop_ui=function()
     local edited=false
     if drawHUDProfiles then drawHUDProfiles()end
     WS.simple=WS.simple or simpleHUD.normalize()
-    WS.simple.fpm=WS.simple.fpm or{x=10,y=0}
+    WS.simple.fpm=WS.simple.fpm or{x=0,y=0}
     simpleHUD.values=WS.simple
-    uiSection('Simple HUD groups')
+    uiSection('Modify position of Grouped HUD Elements')
+    imgui.text('Save/reload works for newly saved layouts.')
     imgui.text('Move complete groups. Negative X moves left; negative Y moves up.')
-    local function controls(label,p,scope,positionOnly)
-        local function id(text)return scope and(text..'##'..scope)or text end
-        if not positionOnly then
-            local changed,value=imgui.checkbox(id(label..' enabled'),p.enabled)
-            if changed then p.enabled=value;ws_ui_dirty=true;edited=true end
+    local function controls(label,p,positionOnly,resetKeys)
+        local function editedControl()
+            if p.enabled~=nil then p.enabled=true end
+            ws_ui_dirty=true;edited=true
+        end
+        if imgui.button(label..' reset offsets')then
+            p.x,p.y=0,0
+            for _,key in ipairs(resetKeys or{})do WS.simple[key].x,WS.simple[key].y=0,0 end
+            editedControl()
         end
         for _,axis in ipairs({'x','y'})do
             local text=label..' '..axis:upper()
-            local c,v=imgui.slider_float(id(text),p[axis],-4000,4000)
-            if c then p[axis]=v;ws_ui_dirty=true;edited=true end
-            if imgui.button(id(text..' -1'))then p[axis]=math.max(-4000,p[axis]-1);ws_ui_dirty=true;edited=true end
+            local c,v=imgui.slider_float(text,p[axis],-4000,4000)
+            if c then p[axis]=v;editedControl() end
+            if imgui.button(text..' -1')then p[axis]=math.max(-4000,p[axis]-1);editedControl() end
             if imgui.same_line then imgui.same_line()end
-            if imgui.button(id(text..' +1'))then p[axis]=math.min(4000,p[axis]+1);ws_ui_dirty=true;edited=true end
+            if imgui.button(text..' +1')then p[axis]=math.min(4000,p[axis]+1);editedControl() end
             if imgui.spacing then imgui.spacing()end
         end
         if positionOnly~=true then
-            local c,v=imgui.slider_float(id(label..' scale'),p.scale,.1,3)
-            if c then p.scale=v;ws_ui_dirty=true;edited=true end
-            if imgui.button(id(label..' scale -0.01'))then p.scale=math.max(.1,p.scale-.01);ws_ui_dirty=true;edited=true end
+            local c,v=imgui.slider_float(label..' scale',p.scale,.1,3)
+            if c then p.scale=v;editedControl() end
+            if imgui.button(label..' scale -0.01')then p.scale=math.max(.1,p.scale-.01);editedControl() end
             if imgui.same_line then imgui.same_line()end
-            if imgui.button(id(label..' scale +0.01'))then p.scale=math.min(3,p.scale+.01);ws_ui_dirty=true;edited=true end
+            if imgui.button(label..' scale +0.01')then p.scale=math.min(3,p.scale+.01);editedControl() end
         end
     end
     local function header(label)
         uiSection()
         return not imgui.collapsing_header or imgui.collapsing_header(label)
     end
-    if header('1. Center ladder')and WS.groups.ladder then
-        imgui.text('Pitch, speed, altitude and FPM move/scale together. Native FPM flight motion is retained.')
-        controls('Center ladder',WS.groups.ladder)
-    end
-    if header('2. FPM alignment')then
-        imgui.text('Fine alignment relative to ladder. Default X +10, Y 0. Negative Y moves up.')
-        controls('FPM',WS.simple.fpm,nil,true)
-    end
-    if header('3. Aircraft status')and WS.groups.info then
+    if header('1. Aircraft Status')and WS.groups.info then
         imgui.text('Plane icon, damage, weapons and ammunition.')
         controls('Aircraft status',WS.groups.info)
     end
-    if header('4. Comms portrait')then controls('Comms portrait',WS.simple.portrait,nil,true)end
-    if header('5. Radio messages')then controls('Radio messages',WS.simple.radio,nil,true)end
-    if header('6. Radar')and WS.groups.radar then controls('Radar',WS.groups.radar)end
-    if header('7. Wingman status')then
-        imgui.text('Additional offset from its normal position above the radar.')
-        controls('Wingman status',WS.simple.wingman,nil,true)
-    end
-    if header('8. Wingman orders')then controls('Wingman orders',WS.simple.orders,nil,true)end
-    if header('9. Mission information')then
-        imgui.text('Move score, current target and time remaining together.')
-        controls('Mission information',WS.simple.mission,nil,true)
+    if header('2. Radar')and WS.groups.radar then controls('Radar',WS.groups.radar)end
+    if header('3. Mission Information')then
+        imgui.text('Move and scale score, current target and time remaining together.')
+        controls('Mission information',WS.simple.mission,false,{'score','target','time'})
         if imgui.indent then imgui.indent()end
         for _,pair in ipairs({{'score','Score'},{'target','Current target'},{'time','Time remaining'}})do
-            if header(pair[2]..'##mission-child')then controls(pair[2],WS.simple[pair[1]],nil,true)end
+            if header(pair[2]..'##mission-child')then controls(pair[2],WS.simple[pair[1]],true)end
         end
         if imgui.unindent then imgui.unindent()end
     end
-    if header('Detailed HUD controls')then
-        imgui.text('Existing individual controls remain available. Group moves are additional offsets.')
-        for _,pair in ipairs({{'ladder','Pitch ladder'},{'radar','Radar'},{'info','Aircraft info'}})do
-            local p=WS.groups[pair[1]]
-            if p and header(pair[2]..'##detailed')then controls(pair[2],p,'detailed:'..pair[1])end
+    if header('4. Center Ladder')and WS.groups.ladder then
+        imgui.text('Pitch, speed, altitude and FPM move/scale together. Native FPM flight motion is retained.')
+        controls('Center ladder',WS.groups.ladder)
+        if imgui.indent then imgui.indent()end
+        if header('Flight Path Marker alignment')then
+            imgui.text('Fine alignment relative to ladder. Baseline X 0, Y 0. Negative Y moves up.')
+            controls('FPM',WS.simple.fpm,true)
         end
-        local ids={};for id in pairs(WS.components)do ids[#ids+1]=id end;table.sort(ids)
-        for _,id in ipairs(ids)do
-            local p=WS.components[id];local label=id:match('([^.]+)$')or id
-            if header(label..'##'..id)then controls(label,p,'component:'..id)end
-        end
+        if imgui.unindent then imgui.unindent()end
+    end
+    if header('5. Wingman Status')then
+        imgui.text('Additional offset from its normal position above the radar.')
+        controls('Wingman status',WS.simple.wingman,false)
+    end
+    if header('6. Wingman Orders')then controls('Wingman orders',WS.simple.orders,true)end
+    if header('7. Comms Portrait')then controls('Comms portrait',WS.simple.portrait,true)end
+    if header('8. Radio messages')then controls('Radio messages',WS.simple.radio,true)end
+    if header('Weapon projection calibration')then
+        local w=simpleHUD.weapon
+        imgui.text('Visual calibration only. Save with the HUD layout for this plane or as a global default.')
+        local c,v=imgui.slider_float('SAAM circle size',w.saamScale,.25,2)
+        if c then w.saamScale=v;ws_ui_dirty=true end
+        if imgui.button('SAAM size -0.01')then w.saamScale=math.max(.25,w.saamScale-.01);ws_ui_dirty=true end
+        if imgui.same_line then imgui.same_line()end
+        if imgui.button('SAAM size +0.01')then w.saamScale=math.min(2,w.saamScale+.01);ws_ui_dirty=true end
+        if imgui.button('Reset SAAM size')then w.saamScale=1;ws_ui_dirty=true end
+        local c,v=imgui.slider_float('Bomb projection FOV adjustment (degrees)',w.bombFov,-40,40)
+        if c then w.bombFov=v;ws_ui_dirty=true end
+        if imgui.button('Bomb FOV -0.25')then w.bombFov=math.max(-40,w.bombFov-.25);ws_ui_dirty=true end
+        if imgui.same_line then imgui.same_line()end
+        if imgui.button('Bomb FOV +0.25')then w.bombFov=math.min(40,w.bombFov+.25);ws_ui_dirty=true end
+        local c,v=imgui.slider_float('Bomb landing height offset',w.bombY,-4000,4000)
+        if c then w.bombY=v;ws_ui_dirty=true end
+        if imgui.button('Bomb height -1')then w.bombY=math.max(-4000,w.bombY-1);ws_ui_dirty=true end
+        if imgui.same_line then imgui.same_line()end
+        if imgui.button('Bomb height +1')then w.bombY=math.min(4000,w.bombY+1);ws_ui_dirty=true end
+        if imgui.button('Reset bomb calibration')then w.bombFov=12.5;w.bombY=0;ws_ui_dirty=true end
     end
     if edited then
         ws_ui_sync();ws_ui_message=''
@@ -1957,11 +2004,10 @@ end
 
 local function ws_simple_discover(rows,rootPath)
     local entries,index,scoreParents={},{},{}
-    simpleHUD.campaignPresent=false
     local function add(o,keys)
         local n=full_name(o);if not n then return end
         if index[n]then return end
-        local entry={o=o,k=n,fn=n,keys=keys,navigation=keys[1]=='mission',mission=keys[1]=='mission'}
+        local entry={o=o,k=n,fn=n,keys=keys,navigation=keys[1]=='mission'}
         entries[#entries+1]=entry;index[n]=entry
     end
     for _,o in ipairs(rows or{})do
@@ -1970,7 +2016,6 @@ local function ws_simple_discover(rows,rootPath)
             local name=leaf(o)
             local campaign=path:find('WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C',1,true)
             local message=path:find('.HUDMessageWidget.',1,true)
-            if campaign and name=='TargetText'then simpleHUD.campaignPresent=true end
             if message and name=='CanvasPanel_ComPortrait'then add(o,{'portrait'})
             elseif message and name=='WBP_HUD_SubWidgets_Parts_RadioText_000'then add(o,{'radio'})
             elseif name=='WBP_HUD_Command_Wingman_000'then add(o,{'orders'})
@@ -1998,11 +2043,11 @@ local function ws_simple_discover(rows,rootPath)
     WS.simpleEntries,WS.simpleIndex=entries,index
 end
 local function ws_simple_delta(entry)
-    -- The automatic row owner establishes its native placement before manual
-    -- mission groups take over. This is local ownership, with no frame delay.
     local key=entry.keys[1]
-    if simpleHUD.campaignPresent and not simpleHUD.targetBase and(key=='mission'or key=='score'or key=='time')then return{X=0,Y=0}end
     local d=simpleHUD.renderOffset(entry.o,entry.keys,not entry.navigation and(key=='score'or key=='time'))
+    -- Child score/time/target rows inherit the campaign container's scale.
+    -- Separate bonus-score panels carry their own mission key and scale once.
+    if d then d.scale=key=='mission'and simpleHUD.scale('mission')or 1 end
     if not d then WS.states['simple:'..entry.keys[1]]='Waiting for parent geometry'end
     return d
 end
@@ -2014,7 +2059,7 @@ ws_simple_missing=function()
     if simpleHUD.navigationActive()and not found.mission then return true end
     for _,key in ipairs({'portrait','radio','orders','mission','score','time'})do
         local p=simpleHUD.values[key]
-        if p and(p.x~=0 or p.y~=0)and not found[key]then return true end
+        if p and(p.x~=0 or p.y~=0 or(p.scale or 1)~=1)and not found[key]then return true end
     end
     return false
 end
@@ -2023,7 +2068,7 @@ local function ws_identify()
     local selected_root = nil
     WS.canvasRoot=nil
     if UW then
-        local ok, arr = pcall(function() return UW:get_objects_matching(false) end)
+        local ok, arr = pcall(function() return AC8Runtime.inventory.objects(UW,false) end)
         if ok and type(arr)=="table" then
             for _, w in ipairs(arr) do
                 local nm=full_name(w)
@@ -2049,7 +2094,7 @@ local function ws_identify()
     local skip={BaseCanvas=true,MainCanvas=true,DynamicDrawCanvas=true,WorldToScreenDrawCanvas=true,
         LowestPriorityCanvasWorldToScreenDraw=true,LowestPriorityDynamicDrawCanvas=true,TopPriorityCanvas=true}
     for _, cls in ipairs(SEARCH_CLASSES) do
-        local ok, arr=pcall(function() return cls:get_objects_matching(false) end)
+        local ok, arr=pcall(function() return AC8Runtime.inventory.objects(cls,false) end)
         if ok and type(arr)=="table" then
             for _, o in ipairs(arr) do
                 local nm=full_name(o)
@@ -2079,7 +2124,7 @@ local function ws_identify()
 
     local scoreClass=api:find_uobject("Class /Script/UMG.Widget")
     if scoreClass then
-        local ok,arr=pcall(function() return scoreClass:get_objects_matching(false) end)
+        local ok,arr=pcall(function() return AC8Runtime.inventory.objects(scoreClass,false) end)
         if ok and type(arr)=="table" then
             ws_simple_discover(arr,selected_root)
             for _,o in ipairs(arr) do
@@ -2109,33 +2154,34 @@ end
 local function ws_transform(entry,p,tag,delta)
     local o,k=entry.o,entry.k
     delta=delta or{X=0,Y=0}
-    local navigation=entry.navigation and(not entry.mission or not simpleHUD.campaignPresent or simpleHUD.targetBase~=nil)
-    local owns=p.enabled or delta.X~=0 or delta.Y~=0 or(navigation and simpleHUD.navigationActive())
+    local navigation=entry.navigation
+    local groupScale=delta.scale or 1
+    local owns=p.enabled or delta.X~=0 or delta.Y~=0 or groupScale~=1 or(navigation and simpleHUD.navigationActive())
     local base=WS.originals[k]
     if not owns and not base then WS.states[tag]="Unchanged";return end
     local ok,err=pcall(function()
         if not base then
-            local x,y=get_rt_xy(o);local sx,sy=get_rt_scale(o)
+            local x,y,sx,sy=get_rt_all(o)
             assert(x and y and sx and sy,"Original transform unavailable")
             base={x=x,y=y,sx=sx,sy=sy};WS.originals[k]=base
         end
         local x=base.x+(p.enabled and p.x or 0)+delta.X
         local y=base.y+(p.enabled and p.y or 0)+delta.Y
-        local scale=p.enabled and p.scale or 1
+        local scale=(p.enabled and p.scale or 1)*groupScale
         local wantSX,wantSY=base.sx*scale,base.sy*scale
         if navigation then
             local nx,ny,nsx,nsy=simpleHUD.navigationPose(o,x,y,wantSX,wantSY)
             if not nx then WS.states[tag]='Waiting for navigation group geometry';return end
             x,y,wantSX,wantSY=nx,ny,nsx,nsy
         end
-        local cx,cy=get_rt_xy(o);local sx,sy=get_rt_scale(o)
+        local cx,cy,sx,sy=get_rt_all(o);local wrote=false
         if not entry.scaleOnly and (not cx or math.abs(cx-x)>0.01 or not cy or math.abs(cy-y)>0.01) then
-            o:SetRenderTranslation({X=x,Y=y})
+            o:SetRenderTranslation({X=x,Y=y});wrote=true
         end
         if not sx or math.abs(sx-wantSX)>0.001 or not sy or math.abs(sy-wantSY)>0.001 then
-            o:SetRenderScale({X=wantSX,Y=wantSY})
+            o:SetRenderScale({X=wantSX,Y=wantSY});wrote=true
         end
-        cx,cy=get_rt_xy(o);sx,sy=get_rt_scale(o)
+        if wrote then cx,cy,sx,sy=get_rt_all(o) end
         assert(cx and cy and sx and sy and (entry.scaleOnly or (math.abs(cx-x)<1 and math.abs(cy-y)<1))
             and math.abs(sx-wantSX)<0.01 and math.abs(sy-wantSY)<0.01,"Transform read-back differs")
         if not owns then WS.originals[k]=nil end
@@ -2143,8 +2189,9 @@ local function ws_transform(entry,p,tag,delta)
     WS.states[tag]=ok and (owns and "Write verified; check headset" or "Restored") or ("Error: "..tostring(err))
 end
 
+local function readField(o,k)return o[k]end
 local function ws_field(o,k)
-    local ok,v=pcall(function() return o[k] end)
+    local ok,v=pcall(readField,o,k)
     if ok then return v end
 end
 local function ws_slot_copy(slot)
@@ -2174,7 +2221,7 @@ local function ws_canvas_capture(root)
     local b={key=key,clipping=call(root,"GetClipping")}
     local cls=api:find_uobject("Class /Script/UMG.GameViewportSubsystem")
     if cls then
-        local ok,arr=pcall(function() return cls:get_objects_matching(false) end)
+        local ok,arr=pcall(function() return AC8Runtime.inventory.objects(cls,false) end)
         if ok and type(arr)=="table" then
             for _,sub in ipairs(arr) do
                 if call(sub,"IsWidgetAdded",root)==true then
@@ -2233,33 +2280,16 @@ local function ws_ancestor_conflict(id)
     return false
 end
 workshop_after=function()
-    simpleHUD.navigationRadars={}
     if WS.elapsed%20==0 then pcall(ws_canvas_apply) end
     for _, t in ipairs(TARGETS) do
         local p=WS.groups[t.key]
         if p and WS_GROUPS[t.key] then
             local tag="group:"..t.key
             if not t.items or #t.items==0 then WS.states[tag]="Not found in this mission"
-            elseif WS.groupbase[t.key].active then
-                
-                local b=WS.groupbase[t.key]
-                local verified=true
+            elseif not WS.groupbase[t.key].active then
                 for _,e in ipairs(t.items) do
-                    local x,y=get_rt_xy(e.o);local sx,sy=get_rt_scale(e.o)
-                    local tx=t.x+(e.sub and (t.sdx or 0) or 0)
-                    local ty=t.y+(e.sub and (t.sdy or 0) or 0)
-                    verified=verified and x~=nil and y~=nil and sx~=nil and sy~=nil
-                        and math.abs(x-tx)<1 and math.abs(y-ty)<1 and math.abs(sx-t.sc)<0.01 and math.abs(sy-t.sc)<0.01
-                end
-                WS.states[tag]=verified and (p.enabled and "Write verified; check headset" or "Herbert baseline") or "Waiting for transform read-back"
-            else
-                local results={}
-                for _,e in ipairs(t.items) do
-                    if t.key=='radar'then simpleHUD.navigationRadars[#simpleHUD.navigationRadars+1]=e.o end
                     ws_transform({o=e.o,k=full_name(e.o),navigation=t.key=='radar'},p,tag)
-                    results[#results+1]=WS.states[tag]
                 end
-                for _,s in ipairs(results) do if s:sub(1,6)=="Error:" then WS.states[tag]=s;break end end
             end
         end
     end
@@ -2313,6 +2343,7 @@ workshop_poll=function()
             workshop_active=true
             WS.groups,WS.components=cmd.groups,cmd.components
             WS.simple=simpleHUD.normalize(cmd.simpleGroups);simpleHUD.values=WS.simple
+            simpleHUD.weapon=simpleHUD.weaponValues(cmd.weaponCalibration)
             simpleHUD.targetBase=simpleHUD.targetCalibration(cmd.simpleTargetBase)
             for _,t in ipairs(TARGETS) do
                 local p=WS.groups[t.key];local b=WS.groupbase[t.key]
@@ -2338,7 +2369,7 @@ workshop_poll=function()
     -- Only an adjusted, missing group requests a fresh current-owner walk.
     -- No global enumeration or geometry cache is added to settled frames.
     if ws_simple_missing()and AC8Runtime.tick>=(WS.simpleNextFind or 0)then
-        local rows=AC8Runtime.ownedWidgets and AC8Runtime.ownedWidgets(AC8Runtime.context.root,true)
+        local rows=AC8Runtime.ownedWidgets and AC8Runtime.ownedWidgets(AC8Runtime.context.root)
         local rootPath=(AC8Runtime.context.rootName or''):match('^%S+ (.+)$')
         if rows and rootPath then ws_simple_discover(rows,rootPath)end
         WS.simpleRetryGap=math.min((WS.simpleRetryGap or 60)*2,600)
@@ -2507,12 +2538,14 @@ local old=rawget(_G,'AC8_CampaignTargetRow')
 if old then old.stopped=true;if old.restore then old.restore() end end
 local S={version=2,ticks=0,enabled=true,stopped=false,status='waiting for flight HUD'}
 rawset(_G,'AC8_CampaignTargetRow',S)
+local function invokeInventory(o,k,...)if AC8Runtime.inventory then return AC8Runtime.inventory.call(o,k,...)end;return o[k](o,...)end
 local function call(o,k,...)
     if o~=uevr.api and not AC8Runtime.isLiveObject(o)then return nil end
     if not o then return nil end
-    local ok,v=pcall(function(...) return o[k](o,...) end,...);if ok then return v end
+    local ok,v=pcall(invokeInventory,o,k,...);if ok then return v end
 end
-local function field(o,k) local ok,v=pcall(function() return o[k] end);if ok then return v end end
+local function readField(o,k)return o[k]end
+local function field(o,k) local ok,v=pcall(readField,o,k);if ok then return v end end
 local function full(o) return call(o,'get_full_name') end
 local function xy(v)
     local x=field(v,'X') or field(v,'x');local y=field(v,'Y') or field(v,'y')
@@ -2522,16 +2555,6 @@ local function transform(o)
     if not AC8Runtime.isLiveObject(o)then return nil,nil end
     local r=call(o,'get_property','RenderTransform')
     return xy(field(r,'Translation')),xy(field(r,'Scale'))
-end
-local slate=call(call(api,'find_uobject','Class /Script/UMG.SlateBlueprintLibrary'),'get_class_default_object')
-local function paintedGeometry(o)
-    return call(o,'GetPaintSpaceGeometry') or call(o,'GetCachedGeometry')
-end
-local function geometry(o)
-    local g=paintedGeometry(o);local size=xy(call(slate,'GetLocalSize',g))
-    if not size or size.X<=0 or size.Y<=0 then return nil end
-    local left=xy(call(slate,'LocalToAbsolute',g,{X=0,Y=size.Y/2}))
-    return left,g
 end
 function S.restore()
     if S.base and S.row and full(S.row)==S.base.name then
@@ -2545,7 +2568,9 @@ local function discover(forceGlobal)
     local R=AC8Runtime
     local owned=not forceGlobal and R.ownedWidgets and R.ownedWidgets(R.context.root)
     local candidates=owned
-    if not candidates then candidates=call(call(api,'find_uobject','Class /Script/UMG.Widget'),'get_objects_matching',false)or{}end
+    if not candidates then
+        candidates=call(call(api,'find_uobject','Class /Script/UMG.Widget'),'get_objects_matching',false)or{}
+    end
     for _,w in ipairs(candidates)do
         local n=full(w) or '';local key=n:match('%.([^%.]+)$')
         if n:find('/Engine/Transient.',1,true) and n:find('WBP_HUD_Chronicle_MainFlight_000_C_',1,true)
@@ -2585,91 +2610,18 @@ local function apply()
         if S.ticks%4~=1 then return end
         discover();if not S.row then return end
     end
-    local w=S.widgets
-    local cfgOK,cfg=pcall(function()return simpleHUD.layoutCommand end)
-    local revision=cfgOK and type(cfg)=='table'and cfg.revision or nil
-    local rowName=full(S.row)or '';local scope=(rowName:match('^(%S+)')or '')..':'..(rowName:match('%.([^%.]+)$')or rowName:match('%s(.+)$')or '')
-    local manual=simpleHUD.missionMoved();local base=simpleHUD.targetBase
-    if base and base.scope~=scope then simpleHUD.targetBase=nil;base=nil end
-    if manual and base then
-        local delta=simpleHUD.renderOffset(S.row,{'target'},true)
-        local current,sc=transform(S.row)
-        if not delta or not current or not sc then S.status='waiting for manual group geometry';return end
-        local wanted={X=base.x+delta.X,Y=base.y+delta.Y}
-        if math.abs(current.X-wanted.X)>.01 or math.abs(current.Y-wanted.Y)>.01 then S.row:SetRenderTranslation(wanted)end
-        if math.abs(sc.X-base.sx)>.001 or math.abs(sc.Y-base.sy)>.001 then S.row:SetRenderScale({X=base.sx,Y=base.sy})end
-        S.status='independent mission subgroup placement';return
-    end
-    if S.cacheRow~=rowName then
-        S.cacheRow=rowName
-        local ok,cached=pcall(function()return json.load_file('AC8_VR-HUDLayoutCache.json')end)
-        local _,scoreScale=transform(w.PrivateScore)
-        if ok and not simpleHUD.missionMoved()and type(cached)=='table'and cached.version==1 and revision and cached.revision==revision and cached.scope==scope
-            and type(cached.x)=='number'and type(cached.y)=='number'and math.abs(cached.x)<4000 and math.abs(cached.y)<4000
-            and scoreScale and type(cached.scale)=='table'and type(cached.scale.X)=='number'and type(cached.scale.Y)=='number'
-            and math.abs(cached.scale.X-scoreScale.X)<.001 and math.abs(cached.scale.Y-scoreScale.Y)<.001 then
-            S.row:SetRenderScale(scoreScale);S.row:SetRenderTranslation({X=cached.x,Y=cached.y});S.status='saved coherent row applied';return
-        end
-    end
-    local score=geometry(w.PrivateScore);local time=geometry(w.TimeText)
-    local target=geometry(w.TargetText);local _,scoreScale=transform(w.PrivateScore)
-    if not score or not time or not target or not scoreScale then S.status='waiting for painted geometry';return end
+    -- Keep the game's internal row layout. Parent movement is owned by the
+    -- existing mission group; this owner applies only the target subgroup.
+    local delta=simpleHUD.renderOffset(S.row,{'target'},true)
     local current,sc=transform(S.row)
-    if not current or not sc then S.status='row transform unavailable';return end
-    local gap=math.abs(score.Y-time.Y)
-    local goal=math.max(score.Y,time.Y)+gap
-    local dx,dy=score.X-target.X,goal-target.Y
-    local x,y=current.X,current.Y
-    -- Fresh painted anchors prove this row already satisfies the layout.
-    -- No cross-frame geometry cache and no assumption about resolution/DPI.
-    if not(gap>=1 and gap<=500 and dx==0 and dy==0 and sc.X==scoreScale.X and sc.Y==scoreScale.Y)then
-    local parent=call(S.row,'GetParent');local g=paintedGeometry(parent)
-    local p=xy(call(slate,'LocalToAbsolute',g,{X=0,Y=0}))
-    local px=xy(call(slate,'LocalToAbsolute',g,{X=1,Y=0}))
-    local py=xy(call(slate,'LocalToAbsolute',g,{X=0,Y=1}))
-    if not p or not px or not py then S.status='parent geometry unavailable';return end
-    local ax,ay,bx,by=px.X-p.X,px.Y-p.Y,py.X-p.X,py.Y-p.Y
-    local det=ax*by-ay*bx
-    if math.abs(det)<.000001 or gap<1 or gap>500 then S.status='invalid geometry or spacing; unchanged';return end
-    local predicted={X=target.X,Y=target.Y}
-    if math.abs(sc.X-scoreScale.X)>.001 or math.abs(sc.Y-scoreScale.Y)>.001 then
-        local rg=paintedGeometry(S.row);local localPoint=xy(call(slate,'AbsoluteToLocal',rg,target));local size=xy(call(slate,'GetLocalSize',rg))
-        local origin=xy(call(slate,'LocalToAbsolute',rg,{X=0,Y=0}));local ex=xy(call(slate,'LocalToAbsolute',rg,{X=1,Y=0}));local ey=xy(call(slate,'LocalToAbsolute',rg,{X=0,Y=1}))
-        local pivot=xy(call(S.row,'GetRenderTransformPivot')or call(S.row,'get_property','RenderTransformPivot'))
-        if not localPoint or not size or not origin or not ex or not ey or not pivot or math.abs(sc.X)<.00001 or math.abs(sc.Y)<.00001 then S.status='waiting for valid row geometry';return end
-        local x=(localPoint.X-pivot.X*size.X)*(scoreScale.X/sc.X-1)
-        local y=(localPoint.Y-pivot.Y*size.Y)*(scoreScale.Y/sc.Y-1)
-        predicted.X=target.X+(ex.X-origin.X)*x+(ey.X-origin.X)*y
-        predicted.Y=target.Y+(ex.Y-origin.Y)*x+(ey.Y-origin.Y)*y
-    end
-    dx=score.X-predicted.X;dy=goal-predicted.Y
-    x=current.X+(dx*by-dy*bx)/det;y=current.Y+(dy*ax-dx*ay)/det
-    end
-    if math.abs(x)>4000 or math.abs(y)>4000 then S.status='computed translation out of range';return end
-    if math.abs(sc.X-scoreScale.X)>.001 or math.abs(sc.Y-scoreScale.Y)>.001 then S.row:SetRenderScale(scoreScale)end
-    if math.abs(dx)>.5 or math.abs(dy)>.5 then S.row:SetRenderTranslation({X=x,Y=y})end
-    local checked=transform(S.row)
-    S.status=checked and math.abs(checked.X-x)<1 and math.abs(checked.Y-y)<1
-        and 'transform verified; visual placement pending' or 'transform readback failed'
-    if revision and S.lastLayout and math.abs(S.lastLayout.x-x)<.1 and math.abs(S.lastLayout.y-y)<.1 then
-        local last=S.savedCache
-        if not last or last.revision~=revision or last.scope~=scope or math.abs(last.x-x)>.5 or math.abs(last.y-y)>.5 then
-            local cached={version=1,revision=revision,scope=scope,x=x,y=y,scale=scoreScale}
-            pcall(function()json.dump_file('AC8_VR-HUDLayoutCache.json',cached,2)end);S.savedCache=cached
-        end
-    end
-    -- Store an owned transform preference, never old frame geometry. Once the
-    -- user moves mission groups, automatic score/time following yields ownership.
-    if math.abs(dx)<=.5 and math.abs(dy)<=.5 and math.abs(sc.X-scoreScale.X)<.001 and math.abs(sc.Y-scoreScale.Y)<.001 then
-        simpleHUD.targetBase={x=x,y=y,sx=scoreScale.X,sy=scoreScale.Y,scope=scope}
-    end
-    S.lastLayout={x=x,y=y}
+    if not delta or not current or not sc then return end
+    local wanted={X=S.base.translation.X+delta.X,Y=S.base.translation.Y+delta.Y}
+    if math.abs(current.X-wanted.X)>.01 or math.abs(current.Y-wanted.Y)>.01 then S.row:SetRenderTranslation(wanted)end
+    if math.abs(sc.X-S.base.scale.X)>.001 or math.abs(sc.Y-S.base.scale.Y)>.001 then S.row:SetRenderScale(S.base.scale)end
+    S.status='native row arrangement with independent target controls'
 end
 uevr.sdk.callbacks.on_post_engine_tick(function()
     local ok,err=pcall(apply);if not ok then S.status=tostring(err) end
-    if not S.stopped and S.ticks%120==0 then
-        
-    end
 end)
 pcall(function() uevr.sdk.callbacks.on_script_reset(S.restore) end)
 
@@ -2685,17 +2637,18 @@ local api=uevr.api
 local old=rawget(_G,'AC8_VelocityAlignment')
 if old then old.stopped=true;if old.restore then old.restore() end end
 local S={version=10,enabled=true,ticks=0,stopped=false,status='waiting for flight HUD',
-    -- Reference FPM calibration in the existing widget's local units.
-    -- Accepted placement: (690+170-2058, 756+30-1080), scale .75.
-    -- These are existing calibration values, not screen pixels or viewport size.
-    x=-1198,y=-294,scale=.75,iconX=1920,iconY=1087}
+    -- Identity container fallback; icon reference preserves confirmed 1080p pose.
+    -- Current slot/pivot data still links the FPM container to the ladder.
+    x=0,y=0,scale=1,iconX=1920,iconY=1080}
 rawset(_G,'AC8_VelocityAlignment',S)
+local function invokeInventory(o,k,...)if AC8Runtime.inventory then return AC8Runtime.inventory.call(o,k,...)end;return o[k](o,...)end
 local function call(o,k,...)
     if o~=uevr.api and not AC8Runtime.isLiveObject(o)then return nil end
     if not o then return nil end
-    local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end
+    local ok,v=pcall(invokeInventory,o,k,...);if ok then return v end
 end
-local function field(o,k)local ok,v=pcall(function()return o[k]end);if ok then return v end end
+local function readField(o,k)return o[k]end
+local function field(o,k)local ok,v=pcall(readField,o,k);if ok then return v end end
 local function full(o)return call(o,'get_full_name')end
 local function xy(v)
     local x,y=field(v,'X'),field(v,'Y')
@@ -2732,7 +2685,9 @@ local function discover(forceGlobal)
     local R=AC8Runtime
     local owned=not forceGlobal and R.ownedWidgets and R.ownedWidgets(R.context.root)
     local candidates=owned
-    if not candidates then candidates=call(call(api,'find_uobject','Class /Script/UMG.Widget'),'get_objects_matching',false)or{}end
+    if not candidates then
+        candidates=call(call(api,'find_uobject','Class /Script/UMG.Widget'),'get_objects_matching',false)or{}
+    end
     for _,w in ipairs(candidates)do
         local n=full(w) or '';local leaf=n:match('%.([^%.]+)$')
         if (leaf=='Velocity' or leaf=='VelocityIcon') and n:find('.WBP_ChroniclePersistent.',1,true) then
@@ -2771,14 +2726,19 @@ local function apply()
     if not matches(translation,wanted,.01) then call(S.velocity,'SetRenderTranslation',wanted);changed=true end
     if not matches(currentScale,scale,.001) then call(S.velocity,'SetRenderScale',scale);changed=true end
 
-    -- Initialize this icon once. Its later translation/scale belong to native
-    -- flight motion; re-pinning every 600 updates creates a visible flash.
+    -- Initialize once in the current slot/parent coordinate space. Defer until
+    -- arranged instead of flashing the old fixed centre at another aspect.
+    -- Later translation/scale belong to native flight motion; never re-pin it.
     if not S.lastIconPin then
         local iconTranslation,iconScale=transform(S.icon)
-        local iconWanted={X=S.iconX,Y=S.iconY};local unit={X=1,Y=1}
-        if not matches(iconTranslation,iconWanted,.01) then call(S.icon,'SetRenderTranslation',iconWanted);changed=true end
-        if not matches(iconScale,unit,.001) then call(S.icon,'SetRenderScale',unit);changed=true end
-        S.lastIconPin=S.ticks
+        local unit={X=1,Y=1}
+        local ix,iy=simpleHUD.resetCenter(S.icon,S.iconX,S.iconY,unit)
+        if ix~=nil and iy~=nil then
+            local iconWanted={X=ix,Y=iy}
+            if not matches(iconTranslation,iconWanted,.01) then call(S.icon,'SetRenderTranslation',iconWanted);changed=true end
+            if not matches(iconScale,unit,.001) then call(S.icon,'SetRenderScale',unit);changed=true end
+            S.lastIconPin=S.ticks
+        end
     end
     if changed then redraw() end
     S.status=linked and'FPM centered on ladder; native motion retained'or'Calibrated FPM placement; waiting for shared canvas layout'
@@ -2800,12 +2760,15 @@ do
 
 local old=rawget(_G,'AC8_ForwardLocator')
 if old then old.stopped=true;if old.restore then old.restore() end end
-local S={version=3,enabled=true,stopped=false,y=-600,ticks=0,status='waiting for locator widget'}
+-- Native locator conversion owns the coordinate correction. Preserve the
+-- game-authored forward offset; do not stack the old -600 compensation.
+local S={version=4,enabled=true,stopped=false,y=0,ticks=0,status='waiting for locator widget'}
 rawset(_G,'AC8_ForwardLocator',S)
+local function invokeInventory(o,k,...)if AC8Runtime.inventory then return AC8Runtime.inventory.call(o,k,...)end;return o[k](o,...)end
 local function call(o,k,...)
     if o~=uevr.api and not AC8Runtime.isLiveObject(o)then return nil end
     if not o then return nil end
-    local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end
+    local ok,v=pcall(invokeInventory,o,k,...);if ok then return v end
 end
 local function full(o)return call(o,'get_full_name')end
 local function read(o)
@@ -2881,9 +2844,10 @@ end
 -- Fixed HUD-container adjustments. No steady-state geometry inspection.
 do
 local R=AC8Runtime;local host=R.host('layout','fixed arrow and wingman status placement')
-local S={version=61,epoch=-1,x=-180,scale=.96,nextControls=0,attempts=0};R.offscreenLocatorMargin=S
+local S={version=61,epoch=-1,x=0,scale=1,nextControls=0,attempts=0};R.offscreenLocatorMargin=S
 local W={version=61,gap=24};R.wingmanSelector=W;R.wingmanStatusLayout=W
-local function call(o,k,...)if not o or(o~=uevr.api and not R.isLiveObject(o))then return end;local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end end
+local function invokeInventory(o,k,...)if AC8Runtime.inventory then return AC8Runtime.inventory.call(o,k,...)end;return o[k](o,...)end
+local function call(o,k,...)if not o or(o~=uevr.api and not R.isLiveObject(o))then return end;local ok,v=pcall(invokeInventory,o,k,...);if ok then return v end end
 local function full(o)return call(o,'get_full_name')end
 local function xy(v)local ok,x,y=pcall(function()return v.X,v.Y end);if ok and type(x)=='number'and type(y)=='number'and x==x and y==y then return{X=x,Y=y}end end
 local function same(a,b)return a and b and math.abs(a.X-b.X)<.01 and math.abs(a.Y-b.Y)<.01 end
@@ -2970,11 +2934,11 @@ host.sdk.callbacks.on_post_engine_tick(function()
 
  if not S.controlsLoaded then
   S.controlsLoaded=true -- Reload preferences on script/game restart.
-  local control=R.read('AC8_VR-OffscreenGroupControls.json')or{}
-  local x=tonumber(control.offsetX)or -180;local factor=tonumber(control.scale)or .96
-  if x~=x or x< -400 or x>0 then x=-180 end
-  if factor~=factor or factor<.8 or factor>1 then factor=.96 end
-  if control.enabled==false then x=-160;factor=1 end
+  local control={} -- TEMP baseline: saved offscreen margins remain on disk.
+  local x=tonumber(control.offsetX)or 0;local factor=tonumber(control.scale)or 1
+  if x~=x or x< -400 or x>0 then x=0 end
+  if factor~=factor or factor<.8 or factor>1 then factor=1 end
+  if control.enabled==false then x=0;factor=1 end
   if x~=S.x or factor~=S.scale then S.x=x;S.scale=factor;S.applied=false;S.attempts=0;S.nextAttempt=0 end
  end
  if S.applied and(W.applied or not W.enabled)then return end
@@ -2985,9 +2949,9 @@ host.sdk.callbacks.on_post_engine_tick(function()
  if not S.applied and S.widget and S.original and S.originalScale and S.originalPivot then
   local wanted={X=S.original.X+S.x,Y=S.original.Y}
   local wantedScale={X=S.originalScale.X*S.scale,Y=S.originalScale.Y*S.scale}
-  local wantedPivot={X=.5,Y=.5};call(S.widget,'SetRenderTransformPivot',wantedPivot)
+  local wantedPivot=S.originalPivot;call(S.widget,'SetRenderTransformPivot',wantedPivot)
   if put(S.widget,wanted)and putScale(S.widget,wantedScale)and same(pivot(S.widget),wantedPivot)then
-   S.last=wanted;S.lastScale=wantedScale;S.lastPivot=wantedPivot;S.applied=true;S.status='off-screen canvas centered scale and left margin applied'
+   S.last=wanted;S.lastScale=wantedScale;S.lastPivot=wantedPivot;S.applied=true;S.status='native off-screen canvas restored; baseline has no margin/scale nudge'
   else S.status='container setter readback failed'end
  end
  if W.enabled then placeStatus()end
@@ -2998,27 +2962,38 @@ end
 
 -- V76: final accepted bomb calibration. No key capture or telemetry.
 do
-local R=AC8Runtime;local host=R.host('layout','accepted bomb projection')
-local cfg=R.read('AC8_VR-BombLandingControls.json')or{};local v=tonumber(cfg.fovAdjustmentDegrees)or 9
-if v~=v or v< -40 or v>40 then v=9 end
-local last
+local R=AC8Runtime;local host=R.host('layout','weapon projection calibration')
+local sent={}
 host.sdk.callbacks.on_post_engine_tick(function()
- local packet=(cfg.enabled~=false and'1'or'0')..'|'..tostring(v)..'|0|'..(gameplay(AC8Runtime)and'1'or'0')
- if packet~=last then uevr.api:dispatch_custom_event('AC8_BombProjectionControls',packet);last=packet end
+ local w=simpleHUD.weapon;local flight=gameplay(R)
+ if w.bombFov~=sent.fov or w.bombY~=sent.y or flight~=sent.bombFlight then
+  uevr.api:dispatch_custom_event('AC8_BombProjectionControls',string.format('1|%.8f|0|%d|%.8f',w.bombFov,flight and 1 or 0,w.bombY))
+  sent.fov,sent.y,sent.bombFlight=w.bombFov,w.bombY,flight
+ end
+ if w.saamScale~=sent.scale or flight~=sent.flight then
+  uevr.api:dispatch_custom_event('AC8_WeaponCalibration',string.format('%.8f|0|%d',w.saamScale,flight and 1 or 0))
+  sent.scale,sent.flight=w.saamScale,flight
+ end
 end)
-host.sdk.callbacks.on_script_reset(function()uevr.api:dispatch_custom_event('AC8_BombProjectionControls','0|0|0|0')end)
+host.sdk.callbacks.on_script_reset(function()
+ uevr.api:dispatch_custom_event('AC8_BombProjectionControls','0|0|0|0')
+ uevr.api:dispatch_custom_event('AC8_WeaponCalibration','1|0|0')
+end)
 end
+
 
 -- V73: refresh the velocity-icon origin attachment every engine frame.
 -- The shared line/circle FOV calibration below remains independent of the origin.
 do
 local R=AC8Runtime;local host=R.host('layout','bomb velocity origin anchor')
 local S={version=73,epoch=-1,nextDiscover=0};R.bombLineAnchor=S
+local function invokeInventory(o,k,...)if AC8Runtime.inventory then return AC8Runtime.inventory.call(o,k,...)end;return o[k](o,...)end
 local function call(o,k,...)
  if o~=uevr.api and not R.isLiveObject(o)then return end
- local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end
+ local ok,v=pcall(invokeInventory,o,k,...);if ok then return v end
 end
-local function field(o,k)local ok,v=pcall(function()return o[k]end);if ok then return v end end
+local function readField(o,k)return o[k]end
+local function field(o,k)local ok,v=pcall(readField,o,k);if ok then return v end end
 local function xy(v)
  local x,y=field(v,'X'),field(v,'Y')
  if type(x)=='number'and type(y)=='number'and x==x and y==y and math.abs(x)<1e7 and math.abs(y)<1e7 then return{X=x,Y=y}end
@@ -3088,14 +3063,16 @@ do
 local R=AC8Runtime;local host=R.host('layout','cached wingman radar-top placement')
 local S={version=81,epoch=-1,nextFind=0,nextRead=0,nextCheck=0};R.wingmanStatusLayout=S;R.wingmanSelector=S
 local file='AC8_VR-WingmanStatusControls.json'
+local function invokeInventory(o,k,...)if AC8Runtime.inventory then return AC8Runtime.inventory.call(o,k,...)end;return o[k](o,...)end
 local function call(o,k,...)
  if not o or(o~=uevr.api and not R.isLiveObject(o))then return end
- local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end
+ local ok,v=pcall(invokeInventory,o,k,...);if ok then return v end
 end
 local function full(o)return call(o,'get_full_name')end
-local function field(o,k)local ok,v=pcall(function()return o[k]end);if ok then return v end end
+local function readField(o,k)return o[k]end
+local function field(o,k)local ok,v=pcall(readField,o,k);if ok then return v end end
 local function xy(v)local x,y=field(v,'X'),field(v,'Y');if type(x)=='number'and type(y)=='number'and x==x and y==y then return{X=x,Y=y}end end
-local function same(a,b)return a and b and math.abs(a.X-b.X)<.1 and math.abs(a.Y-b.Y)<.1 end
+local function same(a,b,epsilon)return a and b and math.abs(a.X-b.X)<(epsilon or .1)and math.abs(a.Y-b.Y)<(epsilon or .1)end
 local zero={X=0,Y=0}
 local slate=call(call(uevr.api,'find_uobject','Class /Script/UMG.SlateBlueprintLibrary'),'get_class_default_object')
 local function normalize(c)
@@ -3123,30 +3100,33 @@ local function restore()
  end
  S.widget=nil;S.canvas=nil;S.slot=nil;S.reparented=false;S.last=nil;S.radarState=nil
  S.small=nil;S.large=nil;S.expanded=nil;S.searchWidget=nil
+ S.scaleOwned=nil
 end
-local function find()
+local function find(forceGlobal)
  local prefix=(R.context.rootName or''):match('^%S+ (.+)$');if not prefix then return end
- 
- local owned=R.ownedWidgets(R.context.root)
- local function objects(class)
-  if owned then return owned end
-  local cls=call(uevr.api,'find_uobject','Class /Script/UMG.'..class)
-  return call(cls,'get_objects_matching',false)or{}
- end
- for _,o in ipairs(objects('CanvasPanel'))do
-  local n=full(o)or''
-  if n:match('^CanvasPanel ')and n:find(' '..prefix..'.',1,true)then
+ local owned,names
+ if not forceGlobal then owned,names=R.ownedWidgets(R.context.root)end
+ local function locate(o,n)
+  if not n or not n:find(' '..prefix..'.',1,true)then return end
+  if n:match('^CanvasPanel ')then
    if n:match('%.AlwaysVisibleCanvas$')then S.canvas=o end
    if n:find('.WBP_HUD_Command_Wingman_000.',1,true)and n:match('%.Command_S$')then S.widget=o;S.name=n end
    if n:find('.MiniMapLayer.',1,true)then
     if n:match('%.MiniMapCornerCanvas$')then S.large=o end
     if n:match('%.MiniMapEnlargedCorners$')then S.expanded=o end
    end
+  elseif n:match('^Border ')and n:find('.MiniMapLayer.',1,true)and n:match('%.RadarBoundingArea$')then
+   S.small=o;local tree=call(o,'get_outer');if(full(tree)or''):match('^WidgetTree ')then S.searchWidget=call(tree,'get_outer')end
   end
  end
- for _,o in ipairs(objects('Border'))do local n=full(o)or''
-  if n:match('^Border ')and n:find(' '..prefix..'.',1,true)and n:find('.MiniMapLayer.',1,true)and n:match('%.RadarBoundingArea$')then
-   S.small=o;local tree=call(o,'get_outer');if(full(tree)or''):match('^WidgetTree ')then S.searchWidget=call(tree,'get_outer')end
+ if owned then
+  for _,o in ipairs(owned)do if R.isLiveObject(o)then locate(o,names[o])end end
+  local missingRadar=S.cfg.followRadarTop and not(S.small and S.large and S.expanded and S.searchWidget)
+  if not S.canvas or not S.widget or missingRadar then return find(true)end
+ else
+  for _,class in ipairs({'CanvasPanel','Border'})do
+   local cls=call(uevr.api,'find_uobject','Class /Script/UMG.'..class)
+   for _,o in ipairs(call(cls,'get_objects_matching',false)or{})do locate(o,full(o))end
   end
  end
  if not S.canvas or not S.widget then S.status='waiting for Command_S and stable canvas';return end
@@ -3184,21 +3164,26 @@ local function apply(c)
  if not move then S.status='waiting for wingman group geometry';return end
  local radarY=radarTop(c);local y=radarY or c.y
  local wanted={X=c.x+move.X,Y=y+move.Y};local size={X=c.width,Y=c.height}
- local scale=simpleHUD.navigationScale()
+ local scale=simpleHUD.navigationScale()*simpleHUD.scale('wingman')
  if simpleHUD.navigationActive()then
   local mapped=simpleHUD.navigationPoint(S.canvas,wanted)
   if not mapped then S.status='waiting for navigation group geometry';return end
   wanted=mapped
  end
  local baseScale=S.originalScale
- if baseScale and(simpleHUD.navigationActive()or S.navigationOwned)then
-  local current=xy(field(call(S.widget,'get_property','RenderTransform'),'Scale'))
+ local transform=call(S.widget,'get_property','RenderTransform')
+ if baseScale and(scale~=1 or S.scaleOwned)then
+  local current=xy(field(transform,'Scale'))
   local scaled={X=baseScale.X*scale,Y=baseScale.Y*scale}
-  if not same(current,scaled)then call(S.widget,'SetRenderScale',scaled)end
-  S.navigationOwned=simpleHUD.navigationActive()
+  if not same(current,scaled,.001)then
+   call(S.widget,'SetRenderScale',scaled)
+   transform=call(S.widget,'get_property','RenderTransform')
+   current=xy(field(transform,'Scale'))
+  end
+  S.scaleOwned=scale~=1 or not same(current,scaled,.001)
  end
  local position=xy(call(S.slot,'GetPosition'));local actualSize=xy(call(S.slot,'GetSize'))
- local translation=xy(field(call(S.widget,'get_property','RenderTransform'),'Translation'))
+ local translation=xy(field(transform,'Translation'))
  if not same(position,wanted)then call(S.slot,'SetPosition',wanted);end
  if not same(actualSize,size)then call(S.slot,'SetSize',size);end
  if translation and not same(translation,zero)then call(S.widget,'SetRenderTranslation',zero);end
@@ -3245,7 +3230,7 @@ local function normalized(v)
  return{linked=v.linked~=false,commonX=number(v.commonX,2000),commonY=number(v.commonY,2000),
   noseX=number(v.noseX,1000),noseY=number(v.noseY,1000),targetX=number(v.targetX,1000),targetY=number(v.targetY,1000)}
 end
-local S={temporary=true,values=normalized(R.read(file)),nativeStatus='waiting',stopped=false}
+local S={temporary=true,values=normalized({}) --[[TEMP baseline: retain saved arrow trims without applying them.]],nativeStatus='waiting',stopped=false}
 R.arrowLiveControls=S
 local function dispatch(name,data)uevr.api:dispatch_custom_event(name,data)end
 local function totals()
@@ -3266,6 +3251,8 @@ end)
 host.sdk.callbacks.on_script_reset(function()S.stopped=true;dispatch('AC8_ArrowLiveControls','off')end)
 end
 -- TEMPORARY LIVE ARROW CALIBRATION END.
+
+
 
 
 end

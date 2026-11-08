@@ -1,69 +1,33 @@
 # AC8 VR
 
-# **OPENXR + NATIVE STEREO REQUIRED**
+**UEVR and OpenXR are required. Select OpenXR in the UEVR injector and use Native Stereo.** If you use SteamVR, set it as your active OpenXR runtime, then still choose OpenXR in UEVR.
 
-Select **OpenXR** when injecting with UEVR, and use **Native Stereo**.
+AC8 VR is a community profile for playing Ace Combat 8 in VR. The November 8, 2026 community preview includes the optimized runtime and the latest cockpit HUD controls.
 
-**SteamVR users can still use OpenXR.** Set SteamVR as your active
-OpenXR runtime, then select OpenXR in UEVR. You can keep using
-SteamVR with your headset.
+[Install the profile](INSTALLATION.md) · [FAQ](FAQ.md) · [Features](features.txt) · [Compatibility](docs/COMPATIBILITY.md)
 
-**Unreleased source update.** The published `v0.1.0` release and tag are unchanged. A new player release will follow tester feedback.
+## What you get
 
-A community UEVR profile for Ace Combat 8. UEVR and the EAC bypass remain separate prerequisites; see [installation](INSTALLATION.md).
+- A cockpit HUD you can move and resize in groups, including the ladder, radar, mission information and wingman status.
+- Separate HUD layouts, cockpit camera positions and UI sizes for each aircraft, plus global defaults.
+- HUD glow in flight, clearer world target labels and smaller off-screen indicators.
+- Better framing in cinematics and the hangar, cleaner loading transitions, readable tutorial cards, and pause/retry navigation that advances one step per press.
+- Optional modules so you can choose which enhancements to use.
 
-## FRESH INSTALL
+## Set up your cockpit
 
-1. Close the game. Back up your existing AceCombat8 profile first: copy the entire
-   %APPDATA%\UnrealVRMod\AceCombat8 folder somewhere safe.
-2. Move the old AceCombat8 folder out of %APPDATA%\UnrealVRMod after backing it up.
-3. Extract this ZIP into %APPDATA%\UnrealVRMod so it contains the new AceCombat8
-   folder. Use a clean install; do not mix in scripts or Lua files from older
-   profiles or other mods. Keep the supplied folders and plugin/assets intact.
-4. Launch the game, inject UEVR using OpenXR, and use Native Stereo.
+1. Enter a mission in **cockpit view**. Open the UEVR menu, enable **Advanced Mode**, and open **Script UI**.
+2. Under **Modify position of Grouped HUD Elements**, use the X, Y and scale controls for the groups you want to change. Under **Aircraft presets**, enable **Enable per-plane settings**, turn off **Use default HUD layout for all planes**, and click **Save HUD layout for current plane**. That save also records the current UEVR **UI Size**.
+3. Adjust UEVR's camera offsets while in the cockpit. Under **Camera and Combined Saves**, click **Save cockpit camera for current plane**, or **Save HUD + cockpit camera for current plane** to save both. Cockpit size is also saved with the camera.
 
-## WHAT'S NEW
+Use the global default buttons to set a fallback for other aircraft. Your individual presets stay saved. See the [configuration guide](docs/CONFIGURATION.md) for the module list and save options.
 
-- Many, many Lua and DLL optimizations reduce repeated discovery and lookups.
-  This helps save many ms on callbacks and what not, but as far as overall FPS
-  improvements I don't want to make any claims.
-- Independent optional modules, which also makes customization easier. No more
-  inter-Lua scheduling and coordination dependencies between optional modules.
-  You can safely remove an optional module by removing its Lua. Keep
-  AC8_VR-Core.lua; the other seven modules are optional.
-- Fixed HUD Glow fx compatibility across OpenXR setups.
-- Per-plane cockpit size adjustment, alongside camera position, HUD layout,
-  and UI Size. (You can move the UEVR camera while in the cockpit using the
-  controller if you hold right-trigger, or manipulate the values in the UEVR
-  dialog. I usually try to line it up so the pilot's shoulders match roughly
-  where mine are and then tweak from there.)
-- Save global HUD and camera defaults without overwriting individual aircraft
-  presets.
-- Separate FPM alignment controls, while keeping it linked to ladder movement
-  and scale.
-- Presentation fixes: pause/retry input skipping, tutorial backgrounds,
-  Aircraft Set/hangar cameras, and the occasional FPM flash.
+## Choose your modules
 
-## HUD AND AIRCRAFT SETTINGS
+**Keep `AC8_VR-Core.lua` enabled.** The other seven scripts are optional. In UEVR's **Lua → Main → Known scripts**, uncheck an optional script to stop its Lua behavior. To disable the entire module, including any native work it enables, close the game, move that Lua file out of the profile's `scripts` folder and relaunch. For example, move `AC8_VR-Cinematics_Hangar_Presentation.lua` to turn off the cinematic and hangar changes.
 
-Enable Advanced settings in UEVR, then open ScriptUI. Use the grouped controls
-to rearrange the HUD. Adjust the cockpit camera and UEVR UI Size, then use the
-save buttons for the current plane. HUD saves for a plane include its UI Size;
-there is also a separate Save UI Size for current plane button.
+## Restart after changing resolution
 
-A few planes include MankTank's preferred settings. Planes without a saved preset
-use the global defaults. You can save your own defaults without overwriting
-individual aircraft presets.
+**After changing the game's resolution or UEVR's render resolution, close and relaunch the game, then inject again.** Glow and other rendering features can stop working until the game restarts.
 
-Uncheck Enable per-plane settings to turn all per-plane overrides off. Your
-saved presets are retained, and the general HUD controls remain available.
-
-## OPTIONAL MODULES
-
-Keep AC8_VR-Core.lua. The other seven Lua modules are optional and do not require
-each other. With the game closed, move an optional Lua out of the scripts folder
-to disable its feature, then restart. Keep the supplied plugins and assets.
-
-Your backup is the easiest way to return to your previous profile.
-
-[Settings and modules](docs/CONFIGURATION.md) · [Compatibility](docs/COMPATIBILITY.md) · [Source/build guide](source_code/MAINTAINERS.md) · [Credits](THIRD_PARTY_NOTICES.md)
+[Source and build guide](https://github.com/manktank/AC8_VR/tree/main/source_code) · [Credits and notices](THIRD_PARTY_NOTICES.md)

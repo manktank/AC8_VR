@@ -12,7 +12,7 @@ Lua owns verified object discovery, presentation intent, settings and HUD placem
 
 From this directory run `build.ps1` using x64 MSVC C++ Build Tools and a Windows SDK with fxc. The script builds with C++17, `/O2 /W4 /WX /MT`; it includes vendored UEVR C headers. `-SkipShaders` retains supplied shader bytecode when source is unchanged.
 
-`build-native.ps1` builds six native modules plus `src/plugin.cpp` into an intermediate payload. `build.ps1` places it at `build/package/plugins/AC8_VR-Features.bin`, builds `loader/loader.cpp` as `AC8_VR-Runtime.dll`, and builds `portable-layer.cpp` as `AC8_VR-OpenXRBridge.dll`. It copies the relative manifest and the 44 assets in `runtime-assets.txt` into that output tree. Never substitute the intermediate native DLL for the thin loader or load the payload a second time as a DLL plugin.
+`build-native.ps1` builds six native modules plus `src/plugin.cpp` into an intermediate payload. `build.ps1` places it at `build/package/plugins/AC8_VR-Features.bin`, builds `loader/loader.cpp` as `AC8_VR-Runtime.dll`, and builds `portable-layer.cpp` as `AC8_VR-OpenXRBridge.dll`. It copies the relative manifest and the 47 assets in `runtime-assets.txt` into that output tree. Never substitute the intermediate native DLL for the thin loader or load the payload a second time as a DLL plugin.
 
 | Native source | Responsibility |
 |---|---|
@@ -50,4 +50,4 @@ The private validation run passed 24 Lua suites, all 128 optional-module combina
 
 Current main is an unreleased source snapshot. `VERSION` and tag v0.1.0 retain the last published version until the owner chooses the next release. Do not alter an existing release, tag or archive as part of a source-only update. Before the next release, align the selected version, changelog and public artifact names.
 
-Build a fresh profile from `PROFILE-FILES.txt`, with no prior Lua set. Omit first-setup markers, backup JSONs, caches, recovery journals, captures, logs and personal cameras.txt; include all 44 assets. Preserve existing users' setup marker/settings when testing or upgrading. Test fresh launch, module removal, plane switches/saves/fallback/master-off, HUD movement/FPM, pause/retry/tutorial, loading, hangar/Aircraft Set, glow and mission exit before publication.
+Build a fresh profile from `PROFILE-FILES.txt`, with no prior Lua set. Omit first-setup markers, backup JSONs, caches, recovery journals, captures, logs and personal cameras.txt; include all 47 assets. Preserve existing users' setup marker/settings when testing or upgrading. Test fresh launch, module removal, plane switches/saves/fallback/master-off, HUD movement/FPM, pause/retry/tutorial, loading, hangar/Aircraft Set, glow and mission exit before publication.

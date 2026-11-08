@@ -54,7 +54,7 @@ struct Scope {
  Scope(Object value){
   Controls c{};uintptr_t table=0;uint32_t flags=0;
   if(!ready||!value||value==scopedActor||!snapshot(c)||!c.enabled||!c.level||
-   !read(value,table)||table!=gameBase+0xca8eb78||
+   !read(value,table)||table!=gameBase+ac8_game_compatibility::rva<0xca8eb78>()||
    !read(reinterpret_cast<unsigned char*>(value)+8,flags)||(flags&0x30)||
    reinterpret_cast<uintptr_t>(host->sdk->uobject->get_outer(value))!=c.level)return;
   static_assert(sizeof(float)==4 && fields[0].offset==0x328 && fields[12].offset==0x358);
@@ -112,14 +112,14 @@ inline bool schema(){
 }
 inline bool initialize(const UEVR_PluginInitializeParam* p){
  host=p;const auto module=GetModuleHandleW(nullptr);gameBase=reinterpret_cast<uintptr_t>(module);
- wchar_t filename[32768]{};std::string hash;
+ 
  constexpr std::array<unsigned char,32> updateHead{{0x4c,0x89,0x44,0x24,0x18,0x48,0x89,0x54,0x24,0x10,0x55,0x56,0x41,0x55,0x48,0x8d,0xac,0x24,0xd0,0xfa,0xff,0xff,0x48,0x81,0xec,0x30,0x06,0,0,0x48,0x83,0xb9}};
  constexpr std::array<unsigned char,32> placementHead{{0x48,0x83,0xec,0x48,0x48,0x8b,0x1,0xf,0x10,0x82,0xa0,0x1,0x0,0x0,0xf2,0xf,0x10,0xd,0xfa,0x54,0x2,0x6,0xf2,0xf,0x5e,0x88,0xe8,0x7,0x0,0x0,0x48,0x8b}};
  std::array<unsigned char,32> b{},d{};
- if(!module||!GetModuleFileNameW(module,filename,32768)||!boundary::cached_module_file_hash(module,filename,hash)||hash!="51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F"||
-  !schema()||!read(reinterpret_cast<void*>(gameBase+0x72802d0),b)||b!=updateHead||!read(reinterpret_cast<void*>(gameBase+0x7284990),d)||d!=placementHead)return false;
- const int second=p->functions->register_inline_hook(reinterpret_cast<void*>(gameBase+0x72802d0),reinterpret_cast<void*>(&updateWrapper),reinterpret_cast<void**>(&originalUpdate));
- const int third=p->functions->register_inline_hook(reinterpret_cast<void*>(gameBase+0x7284990),reinterpret_cast<void*>(&placementWrapper),reinterpret_cast<void**>(&originalPlacement));
+ if(!module||!ac8_game_compatibility::allowed("target_layout")||
+  !schema()||!ac8_game_compatibility::copy_verified_source(reinterpret_cast<void*>(gameBase+ac8_game_compatibility::rva<0x72802d0>()),b,updateHead)||b!=updateHead||!ac8_game_compatibility::copy_verified_source(reinterpret_cast<void*>(gameBase+ac8_game_compatibility::rva<0x7284990>()),d,placementHead)||d!=placementHead)return false;
+ const int second=p->functions->register_inline_hook(reinterpret_cast<void*>(gameBase+ac8_game_compatibility::rva<0x72802d0>()),reinterpret_cast<void*>(&updateWrapper),reinterpret_cast<void**>(&originalUpdate));
+ const int third=p->functions->register_inline_hook(reinterpret_cast<void*>(gameBase+ac8_game_compatibility::rva<0x7284990>()),reinterpret_cast<void*>(&placementWrapper),reinterpret_cast<void**>(&originalPlacement));
  ready=second>=0&&third>=0&&originalUpdate&&originalPlacement&&p->callbacks->on_custom_event(control);
  if(!ready){if(second>=0)p->functions->unregister_inline_hook(second);if(third>=0)p->functions->unregister_inline_hook(third);originalSize=nullptr;originalUpdate=nullptr;originalPlacement=nullptr;}
 

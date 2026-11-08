@@ -17,7 +17,7 @@ static std::atomic<float> pin_scale{1};
 
 static std::atomic<bool> presentation_allowed{true};
 static unsigned componentKind(const std::wstring& name){
-    const auto leaf=name.substr(name.rfind(L'.')+1);
+    const std::wstring_view leaf=std::wstring_view(name).substr(name.rfind(L'.')+1);
     return leaf==L"EscortBillboardImage"?1u:leaf==L"ClockTargetPinBillboardImage"?2u:leaf==L"AntiClockTargetPinBillboardImage"?3u:leaf==L"TextureBox"?4u:0u;
 }
 static void control(const char* event,const char* data){
@@ -220,7 +220,8 @@ static bool restore(const std::wstring& name,Saved& s){
                 auto o=objects[static_cast<size_t>(i)];if(!o)continue;
                 // The exact leaf-name test is independent of outer paths and
                 // rejects unrelated billboards before constructing full names.
-                if(!componentKind(billboardFname(host->sdk->uobject->get_fname(o))))continue;
+                const auto leafKind=componentKind(billboardFname(host->sdk->uobject->get_fname(o)));
+                if(!leafKind||(leafKind==1&&!enabled))continue;
                 View v;auto name=objectName(o);if(name.compare(0,level.size(),level)!=0||!eligible(o,name,&v))continue;
                 const auto kind=componentKind(name);if(kind==1&&!enabled)continue;
                 ++matches;if(kind==4)++refuelMatches;else if(kind>1){++pinMatches;static_cast<void>(0);}

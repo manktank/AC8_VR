@@ -10,9 +10,8 @@
 #include <cstring>
 #include <cstdint>
 namespace hud_policy {
-// GPU channels: exclude glow input/output, normal sharp, emissive sharp,
-// exclude additional decoration. Mode 3 is a reduced portrait border;
-// mode 4 is normal sharp transparency with retained glow.
+// One-hot policies: G accepted portrait output cutout, B native radar blend.
+// R/A forbidden: text coverage comes from its actual complementary sharp image.
 struct Region {float bounds[4]{},flags[4]{};};
 struct Snapshot {
     std::array<Region,48> regions{};
@@ -27,8 +26,11 @@ inline bool parse(const char* data,uint64_t now,Snapshot& result){
     for(unsigned i=0;i<count;++i){auto& r=result.regions[i];
         for(float& v:r.bounds)if(!(stream>>v)||!std::isfinite(v)||v<0||v>1)return false;
         if(r.bounds[0]>=r.bounds[2]||r.bounds[1]>=r.bounds[3])return false;
-        for(unsigned j=0;j<4;++j){float& v=r.flags[j];if(!(stream>>v)||(v!=0&&v!=1&&!(j==2&&(v==2||v==3||v==4))))return false;}
-        if(r.flags[1]&&r.flags[2])return false;
+        for(float& v:r.flags)if(!(stream>>v)||!std::isfinite(v))return false;
+        if(r.flags[0]!=0||r.flags[3]!=0)return false;
+        unsigned selected=0;
+        for(unsigned j=1;j<3;++j){if(r.flags[j]!=0&&r.flags[j]!=1)return false;selected+=r.flags[j]==1;}
+        if(selected!=1)return false;
     }
     std::string extra;if(stream>>extra)return false;
     result.count=count;result.time=now;return true;

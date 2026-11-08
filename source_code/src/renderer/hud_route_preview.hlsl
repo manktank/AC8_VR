@@ -1,7 +1,8 @@
 // Shared authored HUD blending and policy functions. Native glow and sharp
-// layers use separate decisions. Coverage classification below still examines
-// alpha/color to distinguish dark panels; do not describe it as threshold-free.
+// layers use separate decisions. HasDarkCoverage remains below for reference with no call sites.
+// Selected sharp coverage comes from native identity and its stored pixel alpha.
 
+Texture2D<float4> SharpNoGlowLayer : register(t10);
 Texture2D<float4> PolicyMask : register(t9);
 Texture2D<float4> Sharp : register(t0);
 Texture2D<float4> SoftLightTexture : register(t1);
@@ -33,14 +34,6 @@ cbuffer AuthoredParameters : register(b0) {
 #define Texture2DSample(texture,sampler,uv) texture.Sample(sampler,uv)
 #include "hud-route-assets/hud_route_authored_helpers.hlsli"
 struct Vertex { float4 position : SV_Position; float2 uv : TEXCOORD0; };
-float3 BorderEmissionRGB(float3 sharp,float3 glow) {
-    // Keep the halo subordinate to the colored stroke. Large captured glow
-    // intensity values must not clip the edge into a white/desaturated band.
-    float sharpPeak=max(sharp.r,max(sharp.g,sharp.b));
-    float glowPeak=max(glow.r,max(glow.g,glow.b));
-    glow*=min(1,sharpPeak*0.25/max(glowPeak,0.00001));
-    return (sharp+glow)*0.55;
-}
 bool HasDarkCoverage(float4 source) {
     float peak=max(source.r,max(source.g,source.b));
     bool warningRed=source.r>source.g*3 && source.r>source.b*3;
@@ -65,6 +58,13 @@ bool HasDarkCoverage(float4 source) {
     // keep the previous panel blend. No intensity or blur-kernel changes.
     return source.a>emission+slack+1.0/255.0;
 }
+// The authored decoration applies to secondary glow everywhere, including
+// menu/replay blends. Widget policy does not gate the decoration pattern.
+float3 DecoratedSecondary(float4 secondary,float2 uv) {
+    float2 decoUV=uv*float2(1,1440.0/2560.0)*40;
+    float4 deco=MenuDecoTexture.Sample(BilinearWrapSampler,decoUV)*SecondaryDotIntensity;
+    return secondary.rgb*(1+3*deco.a*saturate(secondary.a*2));
+}
 Vertex VS(uint id : SV_VertexID) {
     Vertex o;
     o.uv=float2((id<<1)&2,id&2);
@@ -76,30 +76,25 @@ float4 PS(Vertex i) : SV_Target {
     float2 uv=i.uv*ViewPortScaler.xy;
     float4 policy=PolicyMask.Sample(BilinearClampSampler,i.uv);
     float4 original=Sharp.Sample(BilinearClampSampler,i.uv);
-    float4 combine=lerp(CombineColorTexture.Sample(BilinearClampSampler,uv),original,policy.r);
-    bool emissiveBar=policy.b>0.5 && policy.r>0.5 && original.g>original.r*1.2 && original.g>original.b*1.2;
-    bool planeEmission=policy.b>0.5 && policy.r<0.5;
-    bool sharpEmission=policy.b>1.5 && policy.b<2.5;
-    bool borderEmission=policy.b>2.5 && policy.b<3.5;
-    bool inside=HasDarkCoverage(combine)&&!emissiveBar&&!planeEmission&&!sharpEmission;
-    bool radio=false;
+    float4 combine=CombineColorTexture.Sample(BilinearClampSampler,uv);
+    // Temporary visual test: preserve HasDarkCoverage above, but disable
+    // its alpha/color classification. Portrait cutout remains the final override.
+    bool inside=policy.b>=0.5; // geometry only; HasDarkCoverage remains unused
+    bool radio=false; // subtitle alpha now comes from its actual sharp pixels
     bool alphaBlend=SceneBlendPattern>0||inside;
     bool menu=SceneBlendPattern==3,replay=SceneBlendPattern==2;
     // Black-background emission only. The exact real-scene response is a
     // separate per-eye operation; never bake scenery into this shared HUD.
-    float rate=radio?RadioPortraitLuminanceRate:1;if(alphaBlend)rate=1;
-    float4 first=FirstGlowTexture.Sample(BilinearClampSampler,uv)*GlowIntensity*rate*(1-policy.r);
+    float rate=1; // subtitle alpha coverage never suppresses existing glow
+    float4 first=FirstGlowTexture.Sample(BilinearClampSampler,uv)*GlowIntensity*rate;
     first.a=saturate(dot(first.rgb,luminance));
     float4 base=float4(combine.rgb+first.rgb,combine.a+first.a*(1-combine.a));
-    float4 secondary=SecondaryGlowTexture.Sample(BilinearClampSampler,uv)*SecondaryGlowIntensity*rate*(1-policy.r);
+    float4 secondary=SecondaryGlowTexture.Sample(BilinearClampSampler,uv)*SecondaryGlowIntensity*rate;
     secondary.a=dot(secondary.rgb,luminance);
-    float4 additive=AdditionalGlowTexture.Sample(BilinearClampSampler,uv)*rate*(1-policy.r);
-    float3 secondaryRGB=0;
-    if(!replay){
-        // No extra decorative dots on HUD, tutorials, movies or input prompts.
-        secondaryRGB=secondary.rgb;
-    }else secondaryRGB=secondary.rgb+additive.rgb;
-    float4 empty=EmptyLayerTexture.Sample(BilinearClampSampler,uv);
+    float4 additive=AdditionalGlowTexture.Sample(BilinearClampSampler,uv)*rate;
+    float3 secondaryRGB=DecoratedSecondary(secondary,uv);
+    if(replay)secondaryRGB+=additive.rgb;
+    float4 empty=float4(0,0,0,0);
     float4 core=empty*rate,depth=empty*rate,normal=empty*rate*BlendOpacity;
     float4 color=0;
     if((alphaBlend||radio)&&!menu){
@@ -108,16 +103,17 @@ float4 PS(Vertex i) : SV_Target {
         color.rgb=color.rgb*(1-saturate(dot(secondaryRGB,luminance)))+secondaryRGB;
     }else{
         float neighborhood=GetIntentsityAdjustedByNeighborhood(CombineColorTexture,BilinearClampSampler,uv,float2(1.0/2560,1.0/1440),luminance);
-        color=BlendGlowToScene(SoftLightTexture.Sample(BilinearClampSampler,uv)*(1-policy.r),depth,additive,core,base,float4(0,0,0,1),neighborhood,menu);
+        color=BlendGlowToScene(SoftLightTexture.Sample(BilinearClampSampler,uv),depth,additive,core,base,float4(0,0,0,1),neighborhood,menu);
         color=color*(1-normal.a)+normal;color.rgb+=secondaryRGB;
     }
     // The game writes an opaque scene. A transparent HUD layer needs a separate
     // transport alpha. Source HUD alpha and authored glow alpha are retained.
-    color.rgb=lerp(color.rgb,original.rgb,(emissiveBar||sharpEmission)?policy.r:0);
-    color.rgb=lerp(color.rgb,BorderEmissionRGB(original.rgb,first.rgb+secondaryRGB+additive.rgb),borderEmission?saturate(original.a*8):0);
-    color=lerp(color,original,policy.g);
+    float4 noGlow=SharpNoGlowLayer.Sample(BilinearClampSampler,i.uv);
+    color.rgb=color.rgb*(1-noGlow.a)+noGlow.rgb;
+    float outputCutout=policy.g; // portrait only; radar retains decorated glow
+    color=lerp(color,original,outputCutout);
     float sharpAlpha=original.a;
     float alpha=saturate(max(sharpAlpha,base.a)+saturate(dot(secondaryRGB,luminance))*(1-max(sharpAlpha,base.a)));
     alpha=max(alpha,saturate(dot(max(0,color.rgb),luminance)));
-    return float4(saturate(color.rgb),lerp(alpha,original.a,policy.g));
+    return float4(saturate(color.rgb),lerp(alpha,original.a,outputCutout));
 }

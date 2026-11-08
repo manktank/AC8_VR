@@ -61,24 +61,24 @@ inline bool valid(const Subject& s){
 template<unsigned slot> inline void wrapper(Object object,const void* geometry,float delta){
  const auto address=reinterpret_cast<uintptr_t>(object);const auto original=originals[slot];
  if(address&&address==executing){if(original)original(object,geometry,delta);return;}
- Subject subject{};
- if(paused){std::lock_guard<std::mutex> guard(mutex);auto found=subjects.find(address);if(found!=subjects.end()&&valid(found->second))subject=found->second;}
+ bool pauseOwned=false;
+ if(paused){std::lock_guard<std::mutex> guard(mutex);auto found=subjects.find(address);if(found!=subjects.end()&&valid(found->second))pauseOwned=found->second.pauseOwned;}
  unsigned callRoute=0;
- if(guard_enabled&&subject.pauseOwned){
+ if(guard_enabled&&pauseOwned){
   std::array<void*,96> frames{};unsigned depth=0;
 #ifdef AC8_PAUSE_FIXTURE
   if(stackProvider)depth=stackProvider(frames);else
 #endif
   depth=CaptureStackBackTrace(0,static_cast<DWORD>(frames.size()),frames.data(),nullptr);
   const auto base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));bool viewport=false,native=false;
-  for(unsigned i=0;i<depth;++i){const auto a=reinterpret_cast<uintptr_t>(frames[i]);viewport|=a==base+0x4ac778d;native|=a==base+0x73011d6;}
+  for(unsigned i=0;i<depth;++i){const auto a=reinterpret_cast<uintptr_t>(frames[i]);viewport|=a==base+ac8_game_compatibility::rva<0x4ac778d>();native|=a==base+ac8_game_compatibility::rva<0x73011d6>();}
   callRoute=viewport?(native?3u:1u):native?2u:0u;
  }
  bool nativeRecent=false;
- if(subject.pauseOwned){std::lock_guard<std::mutex> guard(mutex);auto found=subjects.find(address);
+ if(pauseOwned){std::lock_guard<std::mutex> guard(mutex);auto found=subjects.find(address);
   if(found!=subjects.end()&&valid(found->second)){auto& row=found->second;if(callRoute==2u){row.nativeSeen=true;row.nativeOrdinal=engine.load();}
    nativeRecent=row.nativeSeen&&engine.load()>=row.nativeOrdinal&&engine.load()-row.nativeOrdinal<=2;}}
- const bool skipped=guard_enabled&&nativeRecent&&skip_pause_viewport(subject.pauseOwned,callRoute,paused.load());
+ const bool skipped=guard_enabled&&nativeRecent&&skip_pause_viewport(pauseOwned,callRoute,paused.load());
 #ifdef AC8_PAUSE_FIXTURE
  if(skipped)++suppressed;
 #endif
@@ -89,9 +89,9 @@ template<unsigned slot> inline void wrapper(Object object,const void* geometry,f
  }
 }
 inline bool gameBuild(){
-    const auto base=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));IMAGE_DOS_HEADER dos{};IMAGE_NT_HEADERS64 nt{};
-    return world_marker_tone::read(base,dos)&&dos.e_magic==IMAGE_DOS_SIGNATURE&&dos.e_lfanew>0&&dos.e_lfanew<4096&&
-        world_marker_tone::read(base+dos.e_lfanew,nt)&&nt.Signature==IMAGE_NT_SIGNATURE&&nt.FileHeader.TimeDateStamp==1788928637&&nt.OptionalHeader.SizeOfImage==563453952;
+    // Caller-route instruction proofs were captured before hook registration.
+    // Reusing their cached verdict avoids PE reads on every pause discovery.
+    return ac8_game_compatibility::allowed("pause_ticks");
 }
 inline void discover(){
     buildAccepted=gameBuild();if(!buildAccepted)return;
@@ -122,7 +122,7 @@ inline void discover(){
         // Native rendering may own visibility outside the ordinary viewport.
         // An object that is never ticked cannot trigger this guard.
 
-        uintptr_t table=0,address=0;if(!world_marker_tone::read(o,table)||!world_marker_tone::read(reinterpret_cast<void*>(table+111*sizeof(uintptr_t)),address)||address<base||address>=base+563453952)continue;
+        uintptr_t table=0,address=0;if(!world_marker_tone::read(o,table)||!world_marker_tone::read(reinterpret_cast<void*>(table+111*sizeof(uintptr_t)),address)||address<base||!ac8_game_compatibility::contains(address,1,true))continue;
         unsigned slot=0;for(;slot<hookCount;++slot)if(targets[slot]==address)break;
         if(slot==hookCount){if(hookCount>=originals.size()){continue;}MEMORY_BASIC_INFORMATION memory{};unsigned char head=0;
             if(!VirtualQuery(reinterpret_cast<void*>(address),&memory,sizeof(memory))||!(memory.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))||!world_marker_tone::read(reinterpret_cast<void*>(address),head))continue;

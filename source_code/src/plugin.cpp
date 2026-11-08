@@ -4,6 +4,7 @@
 #include "../vendor/uevr/plugin-api.h"
 
 #include "module-selection.h"
+#include "backend/game-compatibility-runtime.h"
 #include "plane-view.h"
 #include "hud/glow-discovery.h"
 extern "C" bool ac8_cinematic_selected_initialize(const UEVR_PluginInitializeParam*,const UEVR_PluginInitializeParam*,const UEVR_PluginInitializeParam*);
@@ -21,6 +22,8 @@ extern "C" __declspec(dllexport) bool uevr_plugin_initialize(const UEVR_PluginIn
  wchar_t root[32768]{};if(!p->functions->get_persistent_dir(root,32768))return false;
  const auto s=ac8_modules::from_directory(root);
  if(!s.core)return true;
+ // Cache feature contracts before any module changes shared native entries.
+ ac8_game_compatibility::preflight(p,{s.glow,s.targets,s.hud,s.pause,s.cinematics,s.loading});
  // Read once at native startup. No file polling, deferred hook registration or sibling requirements.
  const auto attempt=[&](const char* name,auto fn){
   try{if(!fn()&&p->functions->log_error)p->functions->log_error("[AC8] %s native initialization declined",name);}

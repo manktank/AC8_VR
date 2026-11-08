@@ -20,8 +20,10 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <mutex>
 #include "../../vendor/uevr/plugin-api.h"
 #include "../backend/backend_boundary.h"
+#include "../viewport-helper.h"
 
 namespace target_arrow {
 struct Point {double x,y;};
@@ -191,7 +193,7 @@ static bool gatherText(UEVR_UObjectHandle canvas,int before,int cursorOffset,int
 }
 // All validation precedes modification. Only the newly appended range is
 // touched. Each locator scales about its own center; earlier draws stay intact.
-static bool shiftEmitted(UEVR_UObjectHandle canvas,const Before& before,Point delta,double factor=1,bool forward=false) {
+static bool shiftEmitted(UEVR_UObjectHandle canvas,const Before& before,Point delta,double factor=1) {
     void* renderer=nullptr;Array points{};std::array<Point,512> moved{};std::array<TextChange,16> texts{};int textCount=0;
     if(!read(bytes(canvas)+0x190,renderer)||renderer!=before.renderer ||
        !read(bytes(renderer)+0x228,points)||!validArray(points)||!addedRange(before.points,points.count,points.capacity,512) ||
@@ -245,8 +247,6 @@ static bool shiftEmitted(UEVR_UObjectHandle canvas,const Before& before,Point de
             enabled=false;reason="text setter readback failed; disabled until next test";return false;
         }
     }
-    if(forward){static_cast<void>(0);static_cast<void>(0);static_cast<void>(0);}
-    else{static_cast<void>(0);static_cast<void>(0);static_cast<void>(0);}
     return true;
 }
 template<size_t N> static bool codeMatches(const unsigned char* p,const unsigned char(&expected)[N]);
@@ -259,11 +259,12 @@ static void wrapper(UEVR_UObjectHandle widget,UEVR_UObjectHandle canvas) {
         host->sdk->uobject->is_a(widget,locatorClass) && host->sdk->uobject->is_a(canvas,canvasClass) &&
         read(bytes(widget)+0x618,mode) && mode==0 && snapshot(canvas,before);
     const Point delta{offsetX.load(),offsetY.load()};
-    const double factor=fontLayoutVerified?scale.load():1;
-    { live_controls::TargetScope scope(widget,canvas);fn(widget,canvas); }
+    live_controls::TargetScope scope(widget,canvas);
+    fn(widget,canvas);
+    const double factor=fontLayoutVerified?std::clamp(scale.load()*(scope.value.anchorMapped?scope.value.anchor.scale:1),.1,4.0):1;
     if(!active)return;
     static_cast<void>(0);
-    if(!shiftEmitted(canvas,before,delta,factor))static_cast<void>(0);
+    if(!shiftEmitted(canvas,before,live_controls::resolution::postDelta(delta,scope.value.resolution.active),factor))static_cast<void>(0);
 }
 static void forwardWrapper(UEVR_UObjectHandle widget,UEVR_UObjectHandle canvas) {
     static_cast<void>(0);const auto fn=originalForward;if(!fn)return;
@@ -271,32 +272,31 @@ static void forwardWrapper(UEVR_UObjectHandle widget,UEVR_UObjectHandle canvas) 
     const bool active=enabled.load() && layoutVerified && widget && canvas &&
         host->sdk->uobject->is_a(widget,locatorClass) && host->sdk->uobject->is_a(canvas,canvasClass) &&
         read(bytes(widget)+0x618,mode) && mode==0 && snapshot(canvas,before);
-    const double factor=fontLayoutVerified?scale.load():1;
+    live_controls::TargetScope scope(widget,canvas,0);
     fn(widget,canvas);
+    const double factor=fontLayoutVerified?std::clamp(scale.load()*(scope.value.anchorMapped?scope.value.anchor.scale:1),.1,4.0):1;
     if(!active || factor==1)return;
     static_cast<void>(0);
     // The forward body's existing FowardLocatorOffset already places it.
     // Apply the shared scale only; never add the target's translation here.
-    if(!shiftEmitted(canvas,before,{},factor,true))static_cast<void>(0);
+    if(!shiftEmitted(canvas,before,{},factor))static_cast<void>(0);
 }
 template<size_t N> static bool codeMatches(const unsigned char* p,const unsigned char(&expected)[N]) {
-    std::array<unsigned char,N> actual{};SIZE_T n=0;
-    return ReadProcessMemory(GetCurrentProcess(),p,actual.data(),N,&n) && n==N && std::memcmp(actual.data(),expected,N)==0;
+    return ac8_game_compatibility::code_proof(p,expected);
 }
 
 static void install() {
-    attempted=true;wchar_t path[32768]{};std::string hash;auto module=GetModuleHandleW(nullptr);
-    if(!module || !GetModuleFileNameW(module,path,32768)||!boundary::cached_module_file_hash(module,path,hash)||
-       hash!="51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F") {
-        reason="game executable guard failed; no hook installed";return;
+    attempted=true;auto module=GetModuleHandleW(nullptr);
+    if(!module || !ac8_game_compatibility::allowed("arrows")) {
+        reason="arrow dependency contract failed; no hook installed";return;
     }
     auto base=reinterpret_cast<unsigned char*>(module);
-    if(!codeMatches(base+bodyRva,bodyHead)||!codeMatches(base+forwardRva,forwardHead)||
-       !codeMatches(base+lineRva,lineHead)||!codeMatches(base+textRva,textHead)||!codeMatches(base+slotRva,slotHead)) {
+    if(!codeMatches(base+ac8_game_compatibility::rva<bodyRva>(),bodyHead)||!codeMatches(base+ac8_game_compatibility::rva<forwardRva>(),forwardHead)||
+       !codeMatches(base+ac8_game_compatibility::rva<lineRva>(),lineHead)||!codeMatches(base+ac8_game_compatibility::rva<textRva>(),textHead)||!codeMatches(base+ac8_game_compatibility::rva<slotRva>(),slotHead)) {
         reason="native drawing code guard failed; no hook installed";return;
     }
-    const int targetHook=host->functions->register_inline_hook(base+bodyRva,reinterpret_cast<void*>(&wrapper),reinterpret_cast<void**>(&original));
-    const int forwardHook=host->functions->register_inline_hook(base+forwardRva,reinterpret_cast<void*>(&forwardWrapper),reinterpret_cast<void**>(&originalForward));
+    const int targetHook=host->functions->register_inline_hook(base+ac8_game_compatibility::rva<bodyRva>(),reinterpret_cast<void*>(&wrapper),reinterpret_cast<void**>(&original));
+    const int forwardHook=host->functions->register_inline_hook(base+ac8_game_compatibility::rva<forwardRva>(),reinterpret_cast<void*>(&forwardWrapper),reinterpret_cast<void**>(&originalForward));
     installed=targetHook>=0 && original && forwardHook>=0 && originalForward;
     if(!installed) {
         if(targetHook>=0)host->functions->unregister_inline_hook(targetHook);

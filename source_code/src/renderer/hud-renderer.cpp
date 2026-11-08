@@ -10,6 +10,11 @@
 #include "hud_route_scene.h"
 #include "openxr_handoff.h"
 #include "hud_submission_layout.h"
+#include "selective-glow-inventory.h" // TEMP explicit research inventory; Plan C.
+#include "temporary-glow-production.h" // TEMP passive native-source submission trace; Plan C.
+#include "temporary-radio-paint-marker.h" // TEMP body-only native paint test; Plan C.
+#include "temporary-glow-batch-capture.h" // TEMP one-shot native batch identity; Plan C.
+#include "temporary-glow-split.h" // TEMP owned identity source/comparison; Plan C.
 #include <unordered_set>
 #include <fstream>
 #include <intrin.h>
@@ -39,11 +44,15 @@ uint64_t fence_value=0,scene_consumer=0,generation_frame=0,generation_fence=0;
 std::atomic<bool> active{false},overlay{false};
 std::atomic<bool> refresh_pending{false};
 std::atomic<bool> flight_allowed{false};
+std::atomic<bool> menu_presentation{false};
 std::atomic<bool> cover_active{false};
 std::atomic<const char*> refresh_reason{"glow_activation"};
 bool failed=false,bridge_installed=false,late_session_recovered=false;
 bool glow_requested=true;
 bool try_portable_bridge();
+// Module selection already admits this renderer through HUD_Glow.lua.
+// The accepted selective path must not depend on a temporary test script.
+constexpr bool selective_glow_enabled=true;
 
 bool startup_reset_pending=false;
 bool reset_pending=false;
@@ -65,6 +74,9 @@ struct CopyRecord {
     D3D12_RECT area{};bool hud=false,generated=false,valid=true;
 };
 std::vector<CopyRecord> copies;
+std::unordered_map<ID3D12CommandList*,std::shared_ptr<hud_route_glow::SplitLease>> split_pending;
+struct SubmittedSplit {uint64_t ticket=0;std::shared_ptr<hud_route_glow::SplitLease> lease;};
+std::vector<SubmittedSplit> split_submitted;
 using CopyFn=void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,ID3D12Resource*,ID3D12Resource*);
 using RegionFn=void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,const D3D12_TEXTURE_COPY_LOCATION*,UINT,UINT,UINT,const D3D12_TEXTURE_COPY_LOCATION*,const D3D12_BOX*);
 using BarrierFn=void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,UINT,const D3D12_RESOURCE_BARRIER*);
@@ -82,8 +94,17 @@ void stop(const char* reason){active=false;if(renderer)renderer->policy({});stat
 bool enabled(){return active&&!failed&&!cover_active;}
 hud_policy::PacketCache policy_packets;
 void lifecycle(const char* event,const char* data){
+    if(event&&data&&!std::strcmp(event,"AC8_SelectiveGlowSplitControl")){selective_glow_split::control(data);return;}
+    if constexpr (selective_glow_performance::reporting) {
+        if(event&&data&&!std::strcmp(event,"AC8_SelectiveGlowBatchCapture")){selective_glow_batch_capture::request(data);return;}
+        if(event&&!std::strcmp(event,"AC8_SelectiveGlowBatchCaptureCancel")){selective_glow_batch_capture::cancel();return;}
+        if(event&&data&&!std::strcmp(event,"AC8_SelectiveGlowPaintMarker")){radio_paint_marker::control(data);return;}
+        if(event&&data&&!std::strcmp(event,"AC8_SelectiveGlowInventory")){
+            std::lock_guard<std::recursive_mutex> guard(mutex);
+            selective_glow_inventory::capture(api,data,assets_path,selective_glow_production::arm);return;
+        }
     
-
+    }
 
     // Loading owns the black surround even if an old flight HUD survives.
     // The control already exists; no new poll, render pass or shader is needed.
@@ -106,6 +127,9 @@ void lifecycle(const char* event,const char* data){
     if(event&&data&&!std::strcmp(event,"AC8_HUD_PolicyV50")){std::lock_guard<std::recursive_mutex> guard(mutex);const auto policy=policy_packets.update(data,GetTickCount64());if(renderer)renderer->policy(policy);return;}
     if(!event||!data||std::strcmp(event,"AC8_HUD_GlowLifecycle"))return;
     std::lock_guard<std::recursive_mutex> guard(mutex);
+    if(!std::strcmp(data,"menu_blend_enter")||!std::strcmp(data,"menu_blend_exit")){
+        menu_presentation=!std::strcmp(data,"menu_blend_enter");return;
+    }
     if(!std::strcmp(data,"toggle")){
         glow_requested=!glow_requested;
         if(!glow_requested)stop("manual_off");
@@ -121,7 +145,8 @@ void lifecycle(const char* event,const char* data){
         state="waiting_current_scene_pair";return;
     }
     if(!std::strcmp(data,"outside_flight")){
-        flight_allowed=false;copies.clear();generation_frame=generation_fence=0;
+        if(std::atomic_load(&radio_paint_marker::current)||std::atomic_load(&selective_glow_performance::current))radio_paint_marker::off("outside_flight");
+        flight_allowed=false;menu_presentation=false;copies.clear();generation_frame=generation_fence=0;
         stop("left_flight_off");return;
     }
     if(!std::strcmp(data,"pause_enter")||!std::strcmp(data,"pause_exit")){
@@ -134,6 +159,17 @@ void lifecycle(const char* event,const char* data){
 }
 
 void engine_tick(UEVR_UGameEngineHandle,float){
+    radio_paint_marker::engine_tick(); // TEMP targeted redraws; no added callback.
+    if constexpr (selective_glow_performance::reporting) selective_glow_batch_capture::engine_tick();
+    // Native target creation may flush RHI work: never hold the renderer lock.
+    bool split_allowed=false;
+    {std::lock_guard<std::recursive_mutex> guard(mutex);split_allowed=flight_allowed.load()&&glow_requested&&!failed&&!overlay.load();}
+    selective_glow_split::engine_tick(split_allowed);
+    if constexpr (selective_glow_performance::reporting) {
+        selective_glow_production::Report production_report;
+        {std::lock_guard<std::recursive_mutex> guard(mutex);production_report=selective_glow_production::tick();}
+        selective_glow_production::save(production_report);
+    }
     static_cast<void>(0);
     // F9 is owned by the native renderer. Send its actual requested flight state
     // on the game thread so Lua can pair reversible widget opacity with glow.
@@ -156,6 +192,11 @@ void observe_copy(ID3D12GraphicsCommandList* list,ID3D12Resource* dst,ID3D12Reso
     acquired_images::Token token{};uint64_t frame=0;openxr_handoff::Binding binding;
     const bool observed=active.load()&&!overlay.load()&&bridge.observed_image(dst,token,frame,binding);
     std::lock_guard<std::recursive_mutex> lock(mutex);
+    if constexpr (selective_glow_performance::reporting) selective_glow_production::copy(list,dst,src);
+    if constexpr (selective_glow_performance::reporting) {
+        if(observed&&full&&src==ui.Get())selective_glow_production::hud_copy(list,src,frame);
+    }
+    if(observed&&full&&src==ui.Get())selective_glow_batch_capture::hud_copy(reinterpret_cast<uintptr_t>(list),reinterpret_cast<uintptr_t>(src),frame);
     if(!enabled()||!renderer||dst==src)return;
 
     std::wstring name;if(!known_direct_lists.count(list)){static_cast<void>(0);return;}
@@ -167,7 +208,22 @@ void observe_copy(ID3D12GraphicsCommandList* list,ID3D12Resource* dst,ID3D12Reso
     if(full&&src==ui.Get()){
         if(recorded.size()>=64&&!recorded.count(list)){stop("recording_capacity_off");return;}
         // No change to the host's sharp source. Scene mode only runs generation.
-        nested=true;try{generated=renderer->record(list,dst,src,overlay);if(generated){recorded.insert(list);static_cast<void>(0);state=overlay?"black_overlay_comparison_active":"waiting_current_scene_pair";}}
+        nested=true;try{
+            std::shared_ptr<hud_route_glow::SplitLease> split;
+            auto owned=selective_glow_target::get();
+            if(!overlay&&selective_glow_split::phase.load()==1&&selective_glow_split::copy_source_verified.load()&&owned){
+                auto found=split_pending.find(list);if(found!=split_pending.end())split=found->second;
+                else if(split_pending.size()+split_submitted.size()<64){split=renderer->splitLease();if(split)split_pending.emplace(list,split);}
+            }
+            const auto generation_begin=selective_glow_performance::sample_clock();
+            generated=renderer->record(list,dst,src,overlay,split);
+            const auto generation_ticks=selective_glow_performance::sample_clock()-generation_begin;
+            selective_glow_split::measure([&](selective_glow_split::Measurements& m){
+                m.generation_cpu.add(generation_ticks);m.clean_base_allocation_bytes=renderer->cleanBaseAllocationBytes();
+                if(renderer->cleanBaseRecorded()){++m.clean_base_recordings;m.clean_base_cpu.add(renderer->cleanBaseCpuTicks());}
+            });
+            if(generated&&split)selective_glow_split::mark_consumer(reinterpret_cast<uintptr_t>(list));
+            if(generated){recorded.insert(list);static_cast<void>(0);state=overlay?"black_overlay_comparison_active":"waiting_current_scene_pair";}}
         catch(...){failed=true;stop("record_failed_off");}nested=false;
     }
     if(overlay||!observed||binding.device.Get()!=device.Get())return;
@@ -193,8 +249,11 @@ void STDMETHODCALLTYPE region(ID3D12GraphicsCommandList* list,const D3D12_TEXTUR
     observe_copy(list,dst->pResource,src->pResource,{static_cast<LONG>(x),static_cast<LONG>(y),static_cast<LONG>(x+w),static_cast<LONG>(y+h)},full);
 }
 void STDMETHODCALLTYPE barriers(ID3D12GraphicsCommandList* list,UINT count,const D3D12_RESOURCE_BARRIER* barriers){
+    selective_glow_native_barriers::BarrierScope barrier_scope;
     original_barrier(list,count,barriers);if(nested||!barriers)return;
     std::lock_guard<std::recursive_mutex> lock(mutex);
+    if constexpr (selective_glow_performance::reporting) selective_glow_production::barrier(list,count,barriers);
+    if(barrier_scope.outer)selective_glow_split::record_barriers(reinterpret_cast<uintptr_t>(list),count,barriers);
     for(UINT i=0;i<count;++i){const auto& b=barriers[i];if(b.Type!=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION)continue;
         for(auto& r:copies)if(!r.ticket&&r.list==list&&r.token.resource==b.Transition.pResource){
             if(b.Flags!=D3D12_RESOURCE_BARRIER_FLAG_NONE||(b.Transition.Subresource!=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES&&b.Transition.Subresource!=0)||r.final_state!=b.Transition.StateBefore)r.valid=false;
@@ -206,17 +265,88 @@ void STDMETHODCALLTYPE execute(ID3D12CommandQueue* queue,UINT count,ID3D12Comman
     if(nested){original_execute(queue,count,lists);return;}
     std::lock_guard<std::recursive_mutex> lock(mutex);bool uses=false;ComPtr<ID3D12Device> actual_device;
     const bool checked=queue->GetDesc().Type==D3D12_COMMAND_LIST_TYPE_DIRECT&&SUCCEEDED(queue->GetDevice(IID_PPV_ARGS(&actual_device)))&&actual_device.Get()==device.Get();
-    for(UINT i=0;i<count&&lists;++i){uses=uses||recorded.count(lists[i])!=0;for(const auto& r:copies)uses=uses||(!r.ticket&&r.list==lists[i]);if(checked&&known_direct_lists.size()<64)known_direct_lists.insert(lists[i]);}
+    for(UINT i=0;i<count&&lists;++i){uses=uses||recorded.count(lists[i])!=0||split_pending.count(lists[i])!=0;for(const auto& r:copies)uses=uses||(!r.ticket&&r.list==lists[i]);if(checked&&known_direct_lists.size()<64)known_direct_lists.insert(lists[i]);}
     if(uses&&(!checked||(fence_value&&FAILED(queue->Wait(fence.Get(),fence_value))))){failed=true;stop("queue_wait_failed_off");}
-    original_execute(queue,count,lists);
+    namespace split=selective_glow_split;
+    const bool owns_source=split::has_owned_work(count,lists);
+    bool producer_ok=true,producer_signaled=false;
+    const auto setup_begin=selective_glow_performance::sample_clock();
+    // A queue is pinned by canonical COM identity from the actual owned probe.
+    // Same-device DIRECT alone is not permission to read the private image.
+    if(owns_source)producer_ok=split::handoff.accept_producer(queue,device.Get(),static_cast<ID3D12CommandQueue*>(api->renderer->command_queue));
+    split::Submission split_plan;std::vector<ID3D12CommandList*> with_snapshots;std::vector<std::shared_ptr<hud_route_glow::SplitLease>> leases;
+    std::shared_ptr<selective_glow_handoff::Snapshot> produced_snapshot;
+    uint64_t consumer_waits=0;
+    try{
+        if(lists&&count<=256){
+            split_plan=split::preview_submission(count,lists,checked&&producer_ok,reinterpret_cast<uintptr_t>(queue),reinterpret_cast<uintptr_t>(api->renderer->command_queue),checked,checked&&split::handoff.distinct_producer(queue));
+            for(UINT i=0;i<count;++i){
+                auto found=split_pending.find(lists[i]);if(found!=split_pending.end()){
+                    auto lease=found->second;bool admitted=false;lease->selection_reason=failed?"renderer_failed":lease->submitted?"consumer_lease_already_submitted":split_plan.choice_reasons[i];
+                    if(!failed&&checked&&split_plan.choices[i]&&!lease->submitted){
+                        // Only a previously signaled immutable snapshot can be
+                        // selected. Production later in THIS batch cannot win.
+                        auto snapshot=split::handoff.match(split_plan.keys[i]);
+                        if(snapshot){NestedScope nested_scope;
+                            lease->selection_reason="consumer_copy_preparation_refused";
+                            if(renderer->prepareSplit(lease,snapshot->image.Get(),snapshot,snapshot->policy)){lease->selection_reason="producer_fence_wait_failed";if(split::handoff.wait(queue,snapshot)){admitted=true;++consumer_waits;lease->selection_reason="snapshot_admitted";}}
+                        }else lease->selection_reason="matching_snapshot_not_published";
+                    }
+                    lease->select(admitted);
+                    if(admitted){
+                        if(with_snapshots.empty()){
+                            with_snapshots.reserve(static_cast<size_t>(count)*2);
+                            with_snapshots.insert(with_snapshots.end(),lists,lists+i);
+                        }
+                        with_snapshots.push_back(lease->copy_list.Get());
+                    }
+                    if(leases.empty())leases.reserve(count);
+                    leases.push_back(lease);
+                }
+                if(!with_snapshots.empty())with_snapshots.push_back(lists[i]);
+            }
+            if(owns_source&&producer_ok&&split_plan.valid&&split_plan.after.snapshot_ready()&&split::phase.load()==1){
+                auto target=selective_glow_target::get();if(target){NestedScope nested_scope;
+                    const bool pair=bool(target->sharp);
+                    if(!pair||(split_plan.sharp&&split_plan.sharp->valid&&split_plan.sharp->after.snapshot_ready()&&split_plan.sharp->after.ui_epoch==split_plan.after.ui_epoch))
+                        produced_snapshot=split::handoff.prepare(target->native.Get(),{split_plan.revision,split_plan.after.ui_epoch,split_plan.after.owned_serial,pair?split_plan.sharp->after.owned_serial:0},pair?target->sharp->native.Get():nullptr,prepaint_frame_policy::for_submission(count,lists));
+                }
+            }
+        }else if(owns_source){split::handoff.invalidate("snapshot_submission_extent_refused");producer_ok=false;}
+    }catch(...){
+        with_snapshots.clear();produced_snapshot.reset();
+        // Restore ALL decisions, including a lease whose preparation threw.
+        for(UINT i=0;lists&&i<count;++i){auto found=split_pending.find(lists[i]);if(found!=split_pending.end()){found->second->select(false);found->second->selection_reason="snapshot_preparation_exception";}}
+        split::handoff.invalidate("snapshot_preparation_exception");split_plan={};producer_ok=false;
+    }
+    const auto setup_ticks=selective_glow_performance::sample_clock()-setup_begin;
+    for(UINT i=0;lists&&i<count;++i){auto found=split_pending.find(lists[i]);if(found!=split_pending.end()){
+        split::source_choice(found->second->choice_data&&*found->second->choice_data!=0,found->second->selection_reason);found->second->submitted=true;
+    }}
+    if(with_snapshots.empty())original_execute(queue,count,lists);else original_execute(queue,static_cast<UINT>(with_snapshots.size()),with_snapshots.data());
+    // Separate Execute calls preserve producer -> copy order on this queue.
+    // This handoff adds no consumer fence to the producer's dependencies.
+    const auto copy_submit_begin=selective_glow_performance::sample_clock();
+    if(produced_snapshot){ID3D12CommandList* copy_commands=produced_snapshot->commands.Get();NestedScope nested_scope;original_execute(queue,1,&copy_commands);}
+    const auto signal_begin=selective_glow_performance::sample_clock();
+    const auto copy_submit_ticks=produced_snapshot?signal_begin-copy_submit_begin:0;
+    if(owns_source&&producer_ok)producer_signaled=split::handoff.signal(produced_snapshot);
+    if(!split_plan.lists.empty())split::commit_submission(split_plan,!owns_source||producer_signaled);
+    split::retire_owned_work(count,lists);
+    prepaint_frame_policy::retire(count,lists);
+    if(split::handoff.failed()){split::stop_reason=split::handoff.reason();split::copy_source_verified=false;}
+    const auto signal_ticks=selective_glow_performance::sample_clock()-signal_begin;
+    if(owns_source||!leases.empty())split::measure([&](split::Measurements& m){m.handoff_cpu.add(setup_ticks+copy_submit_ticks+signal_ticks);m.consumer_waits+=consumer_waits;if(producer_signaled&&produced_snapshot)++m.snapshots;});
+    if constexpr (selective_glow_performance::reporting) selective_glow_production::execute(queue,count,lists);
     if(uses){const auto next=fence_value+1;const bool signaled=checked&&SUCCEEDED(queue->Signal(fence.Get(),next));
         for(UINT i=0;i<count&&lists;++i){recorded.erase(lists[i]);for(auto& r:copies)if(!r.ticket&&r.list==lists[i]){if(queue!=api->renderer->command_queue)r.valid=false;if(signaled){r.ticket=next;if(r.generated){generation_frame=r.frame;generation_fence=next;}}else r.valid=false;}}
         for(UINT i=0;i<count&&lists;++i)static_cast<void>(0);
+        for(UINT i=0;i<count&&lists;++i){auto found=split_pending.find(lists[i]);if(found!=split_pending.end()){split_submitted.push_back({signaled?next:UINT64_MAX,found->second});split_pending.erase(found);}}
         if(signaled)fence_value=next;else{failed=true;stop("queue_signal_failed_off");}
     }
 }
 HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* list,ID3D12CommandAllocator* allocator,ID3D12PipelineState* pipeline){
-    const auto result=original_reset(list,allocator,pipeline);if(SUCCEEDED(result)&&!nested){static_cast<void>(0);std::lock_guard<std::recursive_mutex> lock(mutex);recorded.erase(list);copies.erase(std::remove_if(copies.begin(),copies.end(),[&](const CopyRecord& r){return !r.ticket&&r.list==list;}),copies.end());}return result;
+    const auto result=original_reset(list,allocator,pipeline);if(SUCCEEDED(result)&&!nested){static_cast<void>(0);std::lock_guard<std::recursive_mutex> lock(mutex);if constexpr (selective_glow_performance::reporting) selective_glow_production::reset(list);selective_glow_split::reset_list(reinterpret_cast<uintptr_t>(list));split_pending.erase(list);recorded.erase(list);copies.erase(std::remove_if(copies.begin(),copies.end(),[&](const CopyRecord& r){return !r.ticket&&r.list==list;}),copies.end());}return result;
 }
 
 
@@ -289,7 +419,7 @@ openxr_handoff::FrameOutcome frame_sink(openxr_handoff::Session session,const xr
     bool recorded_scene=false;
     try{
         if(!ensure_scene_resources(scene->resource.Get()))return Outcome::unchanged;
-        recorded_scene=scene_renderer->record(*renderer,scene->resource.Get(),hud->resource.Get(),geometry,fence.Get());
+        {NestedScope nested_scope;recorded_scene=scene_renderer->record(*renderer,scene->resource.Get(),hud->resource.Get(),geometry,fence.Get(),menu_presentation.load());}
     }catch(const std::exception& e){
         next_resource_retry=GetTickCount64()+2000;state="retrying_scene_resources";
         if(api->functions->log_error)api->functions->log_error("[AC8 GlowFix 2] Scene resources will retry: %s",e.what());
@@ -306,10 +436,12 @@ openxr_handoff::FrameOutcome frame_sink(openxr_handoff::Session session,const xr
 // automatically resume after the actual submitted fence completes. Never free
 // textures referenced by an unsubmitted host command list or reuse old copies.
 bool reset_can_resume(bool same_device,bool healthy,bool direct_queue,uint64_t completed){
-    return reset_pending&&!failed&&same_device&&healthy&&direct_queue&&recorded.empty()&&
+    return reset_pending&&!failed&&same_device&&healthy&&direct_queue&&recorded.empty()&&split_pending.empty()&&
         completed!=UINT64_MAX&&completed>=fence_value;
 }
 void present(){
+    selective_glow_split::cadence(true);
+    selective_glow_performance::frame(true); // TEMP explicit on/off CPU/cadence sample.
     if(!bridge_installed&&!failed)try_portable_bridge();
     std::lock_guard<std::recursive_mutex> lock(mutex);ui=safe_ui();
     if(failed||!api||!renderer||!fence)return;
@@ -321,6 +453,11 @@ void present(){
     }
     const auto completed=fence->GetCompletedValue();
     if(completed==UINT64_MAX||device->GetDeviceRemovedReason()!=S_OK){failed=true;stop("device_removed_off");return;}
+    for(auto& value:split_submitted){
+        if(value.ticket!=UINT64_MAX&&value.ticket<=completed)
+            renderer->recycleSplit(value.lease);
+    }
+    split_submitted.erase(std::remove_if(split_submitted.begin(),split_submitted.end(),[&](const SubmittedSplit& value){return value.ticket!=UINT64_MAX&&value.ticket<=completed;}),split_submitted.end());
     if(reset_pending&&!reset_can_resume(true,true,queue->GetDesc().Type==D3D12_COMMAND_LIST_TYPE_DIRECT,completed)){
         state="waiting_for_reset_fence";return;
     }
@@ -329,12 +466,12 @@ void present(){
     if(!surface_formats::texture(wanted)){state="unsupported_hud_surface";return;}
     const bool change=!surface_formats::compatible(wanted,current);
     if(!reset_pending&&!change)return;
-    if(!recorded.empty()||completed<fence_value){state="waiting_for_resize_fence";return;}
+    if(!recorded.empty()||!split_pending.empty()||completed<fence_value){state="waiting_for_resize_fence";return;}
     if(GetTickCount64()<next_resource_retry)return;
     try{
         // Keep the old graph alive until the replacement is fully constructed.
         auto replacement=std::make_unique<hud_route_glow::Renderer>(device.Get(),assets_path,
-            static_cast<UINT>(wanted.Width),wanted.Height,wanted.Format);
+            static_cast<UINT>(wanted.Width),wanted.Height,wanted.Format,selective_glow_enabled);
         scene_renderer.reset();renderer=std::move(replacement);
         copies.clear();known_direct_lists.clear();generation_frame=generation_fence=scene_consumer=0;
         reset_pending=startup_reset_pending=false;active=flight_allowed&&glow_requested;
@@ -348,6 +485,10 @@ void present(){
 }
 void device_reset(){
     std::lock_guard<std::recursive_mutex> lock(mutex);
+    if(selective_glow_split::handoff.started()){
+        selective_glow_split::handoff.invalidate("snapshot_device_reset_restart_required");
+        selective_glow_split::stop_reason="snapshot_device_reset_restart_required";
+    }
     if(failed)return;
     reset_pending=startup_reset_pending=true;active=false;
     copies.clear();generation_frame=generation_fence=0;policy_packets=hud_policy::PacketCache{};
@@ -374,15 +515,20 @@ bool try_portable_bridge(){
 bool initialize(const UEVR_PluginInitializeParam* params){
     api=params;device=static_cast<ID3D12Device*>(api->renderer->device);HMODULE module=nullptr;GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,reinterpret_cast<LPCWSTR>(&present),&module);
     wchar_t path[32768]{};if(!module||!GetModuleFileNameW(module,path,32768))return false;const auto directory=std::filesystem::path(path).parent_path();assets_path=directory/L"ac8-hud-assets";
-    renderer=std::make_unique<hud_route_glow::Renderer>(device.Get(),assets_path);native_generation::check(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)));
+    renderer=std::make_unique<hud_route_glow::Renderer>(device.Get(),assets_path,2560,1338,DXGI_FORMAT_B8G8R8A8_UNORM,selective_glow_enabled);native_generation::check(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)));
     ComPtr<ID3D12CommandAllocator> allocator;ComPtr<ID3D12GraphicsCommandList> list;native_generation::check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocator)));native_generation::check(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list)));list->Close();
     auto** methods=*reinterpret_cast<void***>(list.Get());auto** queue_methods=*reinterpret_cast<void***>(api->renderer->command_queue);
+    selective_glow_native_barriers::known_method=reinterpret_cast<uintptr_t>(methods[26]);
     const int a=api->functions->register_inline_hook(methods[17],reinterpret_cast<void*>(&copy),reinterpret_cast<void**>(&original_copy));
     const int b=api->functions->register_inline_hook(queue_methods[10],reinterpret_cast<void*>(&execute),reinterpret_cast<void**>(&original_execute));
     const int c=api->functions->register_inline_hook(methods[10],reinterpret_cast<void*>(&reset),reinterpret_cast<void**>(&original_reset));
     const int d=api->functions->register_inline_hook(methods[16],reinterpret_cast<void*>(&region),reinterpret_cast<void**>(&original_region));
     const int e=api->functions->register_inline_hook(methods[26],reinterpret_cast<void*>(&barriers),reinterpret_cast<void**>(&original_barrier));
     if(a<0||b<0||c<0||d<0||e<0||!original_copy||!original_execute||!original_reset||!original_region||!original_barrier){failed=true;state="hook_failed_off";return false;}
+    radio_paint_marker::initialize(api,assets_path); // Failure disables only the temporary marker.
+    selective_glow_batch_capture::initialize(api); // All entry guards checked before registration.
+    selective_glow_split::initialize(api);
+    split_submitted.reserve(64); // Bound snapshot/choice lifetime to existing fences.
     try_portable_bridge();
     if(!api->callbacks->on_present(present)){failed=true;state="callback_failed_off";}if(api->callbacks->on_device_reset)api->callbacks->on_device_reset(device_reset);return !failed;
 }

@@ -11,6 +11,7 @@
 #include "world_target_layout.h"
 #include "pause-navigation.h"
 #include "bomb_render.h"
+#include "weapon-calibration.h"
 
 static const UEVR_PluginInitializeParam* api=nullptr;
 static bool cinematic_selected=false;
@@ -55,13 +56,15 @@ extern "C" bool ac8_cinematic_selected_initialize(const UEVR_PluginInitializePar
         const bool projection_callback=cinematic->sdk->callbacks->on_early_calculate_stereo_view_offset&&cinematic->sdk->callbacks->on_early_calculate_stereo_view_offset(cinematic_projection::early);
         if(!projection_control||!projection_callback)cinematic_projection::allowed=false;
     }
-    if(loading){native_fade::initialize();ok=loading->callbacks->on_custom_event(native_fade::control)&&ok;}
+    if(loading){native_fade::initialize(loading);ok=loading->callbacks->on_custom_event(native_fade::control)&&ok;}
     return ok;
 }
 extern "C" bool ac8_hud_support_initialize(const UEVR_PluginInitializeParam* p){
     bomb_projection::initialize(p);bomb_circle::initialize(p);
+    if(!weapon_calibration::initialize(p)&&p->functions->log_error)p->functions->log_error("[AC8] SAAM visual calibration unavailable; native drawing retained");
     // Schema/build guards deliberately forward unchanged when unavailable.
     if(!bomb_render::initialize(p)&&p->functions->log_error)p->functions->log_error("[AC8] Bomb support unavailable; forwarding game rendering");
+    if(bomb_projection::installed&&!weapon_surface::initialize(p)&&p->functions->log_error)p->functions->log_error("[AC8] Weapon HUD-size independence unavailable; calibrated native drawing retained");
     return true;
 }
 extern "C" bool ac8_target_support_initialize(const UEVR_PluginInitializeParam* p){

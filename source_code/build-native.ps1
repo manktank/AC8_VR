@@ -26,9 +26,17 @@ try{
  }
  & $compiler /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /LD @reportingDefines src/plugin.cpp @objects "/Fo:$buildRoot/ac8_vr.obj" "/Fe:$buildRoot/AC8_VR-Runtime.dll" /link /INCREMENTAL:NO "/OUT:$buildRoot/AC8_VR-Runtime.dll" user32.lib d3d12.lib dxgi.lib dxguid.lib gdi32.lib bcrypt.lib d3dcompiler.lib
  if($LASTEXITCODE -ne 0){throw 'Combined AC8_VR-Runtime.dll link failed'}
+ $shaderRoot='src/renderer'
+ foreach($spec in @(@('FrameMaskVS','vs_5_0','AC8_VR-frame-mask-VS.dxbc'),@('FrameMaskPS','ps_5_0','AC8_VR-frame-mask-PS.dxbc'))){
+  & $fxc /nologo /WX /O3 /T $spec[1] /E $spec[0] /Fo "$shaderRoot/hud-route-assets/$($spec[2])" "$shaderRoot/prepaint-frame-mask.hlsl"
+  if($LASTEXITCODE -ne 0){throw 'Frame policy mask shader build failed'}
+ }
+ & {
+  & $fxc /nologo /WX /O3 /T ps_5_0 /E IdentityFilterPS /Fo "$shaderRoot/hud-route-assets/AC8_VR-identity-filter-PS.dxbc" "$shaderRoot/temporary-glow-identity-filter.hlsl"
+  if($LASTEXITCODE -ne 0){throw 'Identity filter shader build failed'}
+ }
  if(-not $SkipShaders){
-  $shaderRoot='src/renderer'
-  foreach($spec in @(@('hud_route_preview.hlsl','VS','vs_5_0','hud-route-VS.dxbc'),@('hud_route_preview.hlsl','PS','ps_5_0','hud-route-PS.dxbc'),@('hud_policy_pass.hlsl','MaskPS','ps_5_0','hud-mask-PS.dxbc'),@('hud_policy_pass.hlsl','PrefilterPS','ps_5_0','hud-filter-PS.dxbc'),@('hud_route_scene.hlsl','SceneVS','vs_5_0','hud-scene-VS.dxbc'),@('hud_route_scene.hlsl','ScenePS','ps_5_0','hud-scene-PS.dxbc'))){
+  foreach($spec in @(@('temporary-glow-identity-filter.hlsl','SharpLayerPS','ps_5_0','AC8_VR-sharp-layer-PS.dxbc'),@('temporary-glow-identity-filter.hlsl','SharpBasePS','ps_5_0','AC8_VR-sharp-base-PS.dxbc'),@('hud_route_preview.hlsl','VS','vs_5_0','hud-route-VS.dxbc'),@('hud_route_preview.hlsl','PS','ps_5_0','hud-route-PS.dxbc'),@('hud_policy_pass.hlsl','MaskPS','ps_5_0','hud-mask-PS.dxbc'),@('hud_policy_pass.hlsl','PrefilterPS','ps_5_0','hud-filter-PS.dxbc'),@('hud_route_scene.hlsl','SceneVS','vs_5_0','hud-scene-VS.dxbc'),@('hud_route_scene.hlsl','ScenePS','ps_5_0','hud-scene-PS.dxbc'))){
    & $fxc /nologo /WX /O3 /T $spec[2] /E $spec[1] /Fo "$shaderRoot/hud-route-assets/$($spec[3])" "$shaderRoot/$($spec[0])"
    if($LASTEXITCODE -ne 0){throw "Shader build failed: $($spec[1])"}
   }

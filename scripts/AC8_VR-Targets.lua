@@ -34,7 +34,8 @@ do
 -- to the pre-V77 post-tick writer, leaving the introduction's initial size native.
 (function(uevr,json)
 local R=AC8Runtime;local S={version=80,packet=nil,ticks=0};R.worldTargetLayout=S
-local function call(o,k,...)if not o then return end;local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end end
+local function invokeMethod(o,k,...)return o[k](o,...)end
+local function call(o,k,...)if not o then return end;local ok,v=pcall(invokeMethod,o,k,...);if ok then return v end end
 local function valid(v,lo,hi)return type(v)=='number'and v==v and v>=lo and v<=hi end
 local function update()
  if not gameplay(AC8Runtime)then
@@ -75,9 +76,10 @@ local R=AC8Runtime
 local S={version=103,mode='size once per discovered target',ticks=0,epoch=-1,rows={}}
 R.worldBoxDimensionRollback=S
 local fields={'ContainerBoxImageSize','SelectTargetAddContainerBoxSize'}
+local function invokeMethod(o,k,...)return o[k](o,...)end
 local function call(o,k,...)
  if not o or(o~=uevr.api and not R.isLiveObject(o))then return end
- local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end
+ local ok,v=pcall(invokeMethod,o,k,...);if ok then return v end
 end
 local function read(o,key)return call(o,'get_property',key)end
 local function restore()
@@ -159,7 +161,8 @@ local S={version=104,ticks=0,rows={},pinActors={}}
 rawset(_G,'AC8TargetPinsV56',S)
 local worldKeys={'ClockTargetPinOffset','AntiClockTargetPinOffset'}
 local locatorKeys={'TargetPinSize'}
-local function call(o,k,...)if not o then return end;local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end end
+local function invokeMethod(o,k,...)return o[k](o,...)end
+local function call(o,k,...)if not o then return end;local ok,v=pcall(invokeMethod,o,k,...);if ok then return v end end
 local function live(o)return AC8Runtime.isLiveObject(o)end
 local function full(o)if live(o)then return call(o,'get_full_name')end end
 local function prop(o,k)return call(o,'get_property',k)end
@@ -239,6 +242,7 @@ uevr.sdk.callbacks.on_pre_viewport_client_draw(function()
  local controls=setting(json,'AC8_VR-TargetSettings.json')
  local factor=type(controls)=='table'and controls.enabled and tonumber(controls.boxScale)or 1
  if not factor or factor~=factor or factor<.1 or factor>2 then return end
+ if factor==1 and not next(S.rows)then if S.hud~=nil or S.components~=nil or next(S.pinActors)then S.hud=nil;S.hudObject=nil;S.pinActors={};S.components=nil end return end
  local hud=call(call(api,'get_player_controller',0),'GetHUD');local hn=full(hud)or''
  local level=hn:match('^LiveMainHUDParent4K_C (.+%.PersistentLevel)%.');local seen={}
  if level then

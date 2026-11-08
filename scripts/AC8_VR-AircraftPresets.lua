@@ -25,7 +25,10 @@ local function newAircraftPresetStore(files,defaults)
         for _,key in ipairs({'ladder','radar','info'})do if not parameters(v.groups[key])then return end end
         local n=0;for key,p in pairs(v.components or{})do n=n+1;if n>24 or type(key)~='string'or not parameters(p)then return end end
         if v.canvas and(not parameters(v.canvas)or type(v.canvas.extraWidth)~='number'or v.canvas.extraWidth~=v.canvas.extraWidth or v.canvas.extraWidth<0 or v.canvas.extraWidth>4000 or type(v.canvas.extraHeight)~='number'or v.canvas.extraHeight~=v.canvas.extraHeight or v.canvas.extraHeight<0 or v.canvas.extraHeight>4000 or type(v.canvas.inheritClip)~='boolean')then return end
-        local out={groups=copy(v.groups),components=copy(v.components or{}),canvas=copy(v.canvas),simpleGroups=copy(v.simpleGroups or{}),simpleTargetBase=copy(v.simpleTargetBase)}
+        local out={coordinateRevision=v.coordinateRevision,weaponCalibration=copy(v.weaponCalibration),groups=copy(v.groups),components=copy(v.components or{}),canvas=copy(v.canvas),simpleGroups=copy(v.simpleGroups or{}),simpleTargetBase=copy(v.simpleTargetBase)}
+        if v.coordinateRevision~=nil and v.coordinateRevision~=2 then return end
+        local w=v.weaponCalibration
+        if w~=nil and(type(w)~='table'or type(w.saamScale)~='number'or w.saamScale~=w.saamScale or w.saamScale<.25 or w.saamScale>2 or type(w.bombFov)~='number'or w.bombFov~=w.bombFov or math.abs(w.bombFov)>40 or type(w.bombY)~='number'or w.bombY~=w.bombY or math.abs(w.bombY)>4000)then return end
         if out.simpleGroups then
             out.simpleGroups.navigation=nil -- Retired combined mover; ignore legacy saved values.
             for key,p in pairs(out.simpleGroups)do
@@ -242,7 +245,8 @@ local function newFlightUISize(files,vr,store,enabled)
   for k,x in pairs(v.planes or{})do n=n+1;if n>256 or not plane(k)or not number(x)then return end;out.planes[k]=number(x)end
   return out
  end
- function S.read()local ok,v=pcall(function()return vr:get_mod_value('UI_Size')end);return ok and number(v)or nil end
+ local function readUISize()return vr:get_mod_value('UI_Size')end
+ function S.read()local ok,v=pcall(readUISize);return ok and number(v)or nil end
  local function write(v)
   if same(S.read(),v)then return true end
   local ok=pcall(function()vr.set_mod_value('UI_Size',tostring(v))end);return ok and same(S.read(),v)
@@ -285,8 +289,8 @@ local function newFlightUISize(files,vr,store,enabled)
   if S.owned and plane(key)and S.selection==key then return end
   local actual=S.read();if not actual or not init(actual)then return end
   if not plane(key)then
-   if not S.restore()then return end
-   actual=S.read()
+   local wasOwned=S.owned;if not S.restore()then return end
+   if wasOwned then actual=S.read()end
    if actual and not same(actual,S.db.defaultSize)then local next=clone(S.db);next.defaultSize=actual;local ok,why=persist(next);if not ok then S.message=why end end
    return
   end
@@ -386,6 +390,8 @@ owner.drawUI=function()
     if R.aircraftPresets then
         local changed,value=imgui.checkbox('Use default HUD layout for all planes',hudProfiles.db.useDefaultForAllPlanes)
         if changed then queueProfileAction('mode',value)end
+        imgui.text('With both on, all planes share one HUD layout.')
+        imgui.text('Each plane can still use its own camera and flight canvas size.')
     end
     local plane=hudProfiles.currentPlane
     local label=plane and(plane:match('^BP_PlayerPlane_PP%d+_(.-)_C$')or plane):upper()or'No active aircraft'
@@ -396,27 +402,32 @@ owner.drawUI=function()
     if imgui.button('Save current camera as global default')then queueProfileAction('cameraGlobal')end
     imgui.text('Global HUD updates the fallback/shared layout. Camera saves position only.')
     imgui.text('Saved aircraft presets are preserved.')
-    uiSection('HUD layout saves')
+    if R.aircraftPresets then
+        uiSection('Camera and Combined Saves')
+        if imgui.button('Save cockpit camera for current plane')then queueProfileAction('camera')end
+        if R.hudLayoutControls and imgui.button('Save HUD + cockpit camera for current plane')then queueProfileAction('both')end
+    end
+    uiSection('HUD Layout Saves')
     if R.hudLayoutControls and imgui.button('Save HUD layout for current plane')then queueProfileAction('plane')end
     if R.hudLayoutControls and imgui.button('Save HUD layout for ALL planes')then queueProfileAction('all')end
     if imgui.spacing then imgui.spacing()end
     if R.hudLayoutControls and imgui.button('Reset HUD to saved layout')then queueProfileAction('reset')end
-    if R.aircraftPresets then
-        uiSection('Camera and combined saves')
-        if imgui.button('Save cockpit camera for current plane')then queueProfileAction('camera')end
-        if R.hudLayoutControls and imgui.button('Save HUD + cockpit camera for current plane')then queueProfileAction('both')end
-    end
     imgui.text('Shared and aircraft layouts are separate. Reset uses the selected mode and saved fallbacks.')
     if hudProfiles.message~=''then imgui.text(hudProfiles.message)end
     local uiSize=R.flightUISize
     if uiSize then
-        uiSection('Flight UI Size')
+        uiSection('Flight UI Canvas Size')
         local current=uiSize.read()
         imgui.text('Current UI Size: '..(current and string.format('%.3g',current)or'unavailable'))
         imgui.text('Normal UI Size: '..(uiSize.db and string.format('%.3g',uiSize.db.defaultSize)or'waiting'))
         if imgui.button('Save UI Size for current plane')then queueProfileAction('uiSize')end
         if imgui.button('Use normal UI Size for current plane')then queueProfileAction('uiSizeDefault')end
-        imgui.text('Adjust UI Size in the UEVR menu. HUD saves for this plane include it too.')
+        imgui.text('This will only affect the size of the canvas for this particular plane,')
+        imgui.text('and only during flight. This will allow you to make the canvas much larger')
+        imgui.text('and then you can counter-scale down the HUD elements to put them more to')
+        imgui.text('the sides, or much further down.')
+        imgui.text(' ')
+        imgui.text('Adjust UI Size in the UEVR Menu. HUD saves for this plane include it too.')
         imgui.text('Independent of shared HUD layout. Pause/retry keep the flight size; other modes use normal size.')
         if uiSize.message then imgui.text(uiSize.message)end
     end
@@ -476,9 +487,10 @@ R.planeSpecificOffset=S
 local host=R.host('utility','plane specific UEVR camera')
 local keys={forward='VR_CameraForwardOffset',right='VR_CameraRightOffset',up='VR_CameraUpOffset'}
 local axes={'forward','right','up'}
+local function invokeMethod(o,k,...)return o[k](o,...)end
 local function call(o,k,...)
  if not o or not R.isLiveObject(o)then return end
- local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end
+ local ok,v=pcall(invokeMethod,o,k,...);if ok then return v end
 end
 local function row(v)
  if type(v)~='table'then return end

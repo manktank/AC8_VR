@@ -19,6 +19,12 @@
 namespace tick_probe {
 #include "hud-tick-validation.h"
 #include "hud-tick-guard-guards.h"
+static const std::array<uint32_t,3>& resolvedTicks(){
+    static const std::array<uint32_t,3> values{ac8_game_compatibility::rva<tickRVAs[0]>(),ac8_game_compatibility::rva<tickRVAs[1]>(),ac8_game_compatibility::rva<tickRVAs[2]>()};return values;
+}
+static const std::array<uint32_t,2>& resolvedRoutes(){
+    static const std::array<uint32_t,2> values{ac8_game_compatibility::rva<routeReturns[0]>(),ac8_game_compatibility::rva<routeReturns[1]>()};return values;
+}
 using Object=UEVR_UObjectHandle;using WidgetTick=void(*)(Object,const void*,float);
 static const UEVR_PluginInitializeParam* host=nullptr;
 static WidgetTick originals[2]{};
@@ -63,7 +69,7 @@ enum class Route:unsigned {Unknown=0,ExtraViewport=1,NativeTexture=2,Mixed=3};
 static Route classify(const void* const* stack,size_t count,uintptr_t base){
     bool viewport=false,native=false;
     for(size_t i=0;i<count;++i){const auto a=reinterpret_cast<uintptr_t>(stack[i]);
-        viewport|=a==base+routeReturns[0];native|=a==base+routeReturns[1];}
+        viewport|=a==base+resolvedRoutes()[0];native|=a==base+resolvedRoutes()[1];}
     return viewport?(native?Route::Mixed:Route::ExtraViewport):(native?Route::NativeTexture:Route::Unknown);
 }
 #ifdef TICK_PROBE_FIXTURE
@@ -82,8 +88,29 @@ static bool suppress(unsigned kind,Object object,Route route){
     Subjects current{};{std::lock_guard<std::mutex> lock(gate);current=subjects;}
     return kind<2&&object==current.objects[kind]&&validSubjects(current);
 }
-static void rootWrapper(Object o,const void* g,float dt){if(!suppress(0,o,guardEnabled&&installed?currentRoute():Route::Unknown))originals[0](o,g,dt);}
-static void messageWrapper(Object o,const void* g,float dt){if(!suppress(1,o,guardEnabled&&installed?currentRoute():Route::Unknown))originals[1](o,g,dt);}
+static bool routeCandidate(unsigned kind,Object object){
+    if(kind>=2||!guardEnabled.load()||!installed.load())return false;
+    std::lock_guard<std::mutex> lock(gate);
+    return object==subjects.objects[kind];
+}
+static void rootWrapper(Object o,const void* g,float dt){
+    Route route=Route::Unknown;
+    if(routeCandidate(0,o)){
+        const auto base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        const auto address=reinterpret_cast<uintptr_t>(_ReturnAddress());
+        route=address==base+resolvedRoutes()[1]?Route::NativeTexture:currentRoute();
+    }
+    if(!suppress(0,o,route))originals[0](o,g,dt);
+}
+static void messageWrapper(Object o,const void* g,float dt){
+    Route route=Route::Unknown;
+    if(routeCandidate(1,o)){
+        const auto base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        const auto address=reinterpret_cast<uintptr_t>(_ReturnAddress());
+        route=address==base+resolvedRoutes()[1]?Route::NativeTexture:currentRoute();
+    }
+    if(!suppress(1,o,route))originals[1](o,g,dt);
+}
 static bool discover(Subjects& s){
     auto pc=host->sdk->functions->get_player_controller(0);s.objects[2]=property(pc,L"MyHUD");
     s.objects[0]=property(s.objects[2],L"HudWidget");s.objects[1]=property(s.objects[0],L"HUDMessageWidget");
@@ -91,7 +118,7 @@ static bool discover(Subjects& s){
     constexpr size_t slots[]={111,111,159};
     for(size_t i=0;i<3;++i){
         uintptr_t* table=nullptr;uintptr_t tick=0;
-        if(!read(s.objects[i],s.headers[i])||!read(s.objects[i],table)||!read(table+slots[i],tick)||tick!=base+tickRVAs[i])return false;
+        if(!read(s.objects[i],s.headers[i])||!read(s.objects[i],table)||!read(table+slots[i],tick)||tick!=base+resolvedTicks()[i])return false;
     }
     return validSubjects(s)&&sample(s).valid;
 }
@@ -102,23 +129,21 @@ static bool registerAll(void* module){
     void* destinations[]={reinterpret_cast<void*>(&rootWrapper),reinterpret_cast<void*>(&messageWrapper)};
     void** trampolines[]={reinterpret_cast<void**>(&originals[0]),reinterpret_cast<void**>(&originals[1])};
     for(size_t i=0;i<2;++i){
-        hookIDs[i]=host->functions->register_inline_hook(bytes(module)+tickRVAs[i],destinations[i],trampolines[i]);
+        hookIDs[i]=host->functions->register_inline_hook(bytes(module)+resolvedTicks()[i],destinations[i],trampolines[i]);
         if(hookIDs[i]<0||!*trampolines[i]){unregisterAll();return false;}
     }
     return true;
 }
 static void install(const Subjects& s){
-    attempted=true;auto module=GetModuleHandleW(nullptr);wchar_t path[32768]{};std::string hash;
-    if(!module||!GetModuleFileNameW(module,path,32768)||!boundary::cached_module_file_hash(module,path,hash)||
-       hash!="51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F"){status="executable_guard_failed";return;}
+    attempted=true;auto module=GetModuleHandleW(nullptr);
+    if(!module||!ac8_game_compatibility::allowed("hud_ticks")){status="hud_tick_contract_unavailable";return;}
     IMAGE_DOS_HEADER dos{};IMAGE_NT_HEADERS64 nt{};
     if(!read(module,dos)||dos.e_magic!=IMAGE_DOS_SIGNATURE||dos.e_lfanew<0||dos.e_lfanew>4096||
-       !read(bytes(module)+dos.e_lfanew,nt)||nt.Signature!=IMAGE_NT_SIGNATURE||nt.FileHeader.Machine!=IMAGE_FILE_MACHINE_AMD64||
-       nt.FileHeader.TimeDateStamp!=gameTimestamp||nt.OptionalHeader.SizeOfImage!=gameImageSize){status="pe_guard_failed";return;}
-    for(size_t i=0;i<3;++i){std::array<unsigned char,32> actual{};
-        if(!read(bytes(module)+tickRVAs[i],actual)||std::memcmp(actual.data(),tickHeads[i],32)){status="tick_signature_guard_failed";return;}}
-    for(size_t i=0;i<2;++i){std::array<unsigned char,5> actual{};
-        if(!read(bytes(module)+routeReturns[i]-5,actual)||std::memcmp(actual.data(),routeHeads[i],5)){status="caller_route_guard_failed";return;}}
+       !read(bytes(module)+dos.e_lfanew,nt)||nt.Signature!=IMAGE_NT_SIGNATURE||nt.FileHeader.Machine!=IMAGE_FILE_MACHINE_AMD64){status="pe_guard_failed";return;}
+    for(size_t i=0;i<3;++i){
+        if(!resolvedTicks()[i]||!ac8_game_compatibility::code_proof(bytes(module)+resolvedTicks()[i],tickHeads[i])){status="tick_signature_guard_failed";return;}}
+    for(size_t i=0;i<2;++i){
+        if(resolvedRoutes()[i]<5||!ac8_game_compatibility::code_proof(bytes(module)+resolvedRoutes()[i]-5,routeHeads[i])){status="caller_route_guard_failed";return;}}
     subjects=s;
     if(!registerAll(module)){status="hook_registration_failed_rolled_back";return;}
     installed=true;status="guarding_duplicate_viewport_ticks";

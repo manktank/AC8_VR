@@ -9,134 +9,37 @@
       "x": 0,
       "y": 0
     },
-    "components": {
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.BorderScoreText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.PrivateScore": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.PrivateScoreText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.ScoreText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.TeamScoreTitleText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.TimerAndGauge": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -306,
-        "y": 1872.2690905507932
-      },
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.VictoryScoreText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.BonusScorePanel": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.CanvasPanel_ComPortrait": {
-        "enabled": true,
-        "scale": 0.35,
-        "x": -1050,
-        "y": 660
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.ScoreUpdateBonusText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.ScoreUpdateBonusText2": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.ScoreUpdateText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_RadioText_000": {
-        "enabled": false,
-        "scale": 1,
-        "x": 0,
-        "y": 0
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_RadioText_000.WidgetTree.CanvasPanel_96": {
-        "enabled": false,
-        "scale": 1,
-        "x": 0,
-        "y": 0
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_RadioText_000.WidgetTree.RadioPanel": {
-        "enabled": false,
-        "scale": 1,
-        "x": 0,
-        "y": 0
-      },
-      "WidgetTree.WBP_LocatorWidget": {
-        "enabled": false,
-        "scale": 1,
-        "x": 0,
-        "y": 0
-      },
-      "WidgetTree.WBP_TargetSelectionDraw": {
-        "enabled": false,
-        "scale": 1,
-        "x": 0,
-        "y": 0
-      }
-    },
+    "components": null,
+    "coordinateRevision": 2,
     "groups": {
       "info": {
         "enabled": true,
-        "scale": 0.6,
-        "x": 124,
-        "y": -80
+        "scale": 0.6330000162124634,
+        "x": -275.0,
+        "y": 0
       },
       "ladder": {
         "enabled": true,
-        "scale": 0.75,
-        "x": 24,
-        "y": 27
+        "scale": 0.6669999957084656,
+        "x": 0,
+        "y": 0
       },
       "radar": {
         "enabled": true,
-        "scale": 0.76,
-        "x": -220,
-        "y": 45.72210714885517
+        "scale": 0.8499999999999999,
+        "x": -115.0,
+        "y": 0
       }
     },
     "simpleGroups": {
-      "mission": {
+      "fpm": {
         "x": 0,
         "y": 0
+      },
+      "mission": {
+        "scale": 0.8500000238418579,
+        "x": -61.0,
+        "y": 0.0
       },
       "orders": {
         "x": 0,
@@ -163,16 +66,15 @@
         "y": 0
       },
       "wingman": {
-        "x": 0,
+        "scale": 0.8500000238418579,
+        "x": 63.0,
         "y": 0
       }
     },
-    "simpleTargetBase": {
-      "scope": "HorizontalBox:HorizontalBox_1",
-      "sx": 0.7,
-      "sy": 0.7,
-      "x": -304.85000127487,
-      "y": 1776.9188741010937
+    "weaponCalibration": {
+      "bombFov": 12.5,
+      "bombY": 0,
+      "saamScale": 1
     }
   },
   "shared": {
@@ -185,134 +87,37 @@
       "x": 0,
       "y": 0
     },
-    "components": {
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.BorderScoreText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.PrivateScore": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.PrivateScoreText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.ScoreText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.TeamScoreTitleText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.TimerAndGauge": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -306,
-        "y": 1872.2690905507932
-      },
-      "WidgetTree.ForEachWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_CampaignInfo_000_C.WidgetTree.VictoryScoreText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.BonusScorePanel": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.CanvasPanel_ComPortrait": {
-        "enabled": true,
-        "scale": 0.35,
-        "x": -1050,
-        "y": 660
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.ScoreUpdateBonusText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.ScoreUpdateBonusText2": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.ScoreUpdateText": {
-        "enabled": true,
-        "scale": 0.7,
-        "x": -212,
-        "y": 1762.2690905507932
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_RadioText_000": {
-        "enabled": false,
-        "scale": 1,
-        "x": 0,
-        "y": 0
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_RadioText_000.WidgetTree.CanvasPanel_96": {
-        "enabled": false,
-        "scale": 1,
-        "x": 0,
-        "y": 0
-      },
-      "WidgetTree.HUDMessageWidget.WidgetTree.WBP_HUD_SubWidgets_Parts_RadioText_000.WidgetTree.RadioPanel": {
-        "enabled": false,
-        "scale": 1,
-        "x": 0,
-        "y": 0
-      },
-      "WidgetTree.WBP_LocatorWidget": {
-        "enabled": false,
-        "scale": 1,
-        "x": 0,
-        "y": 0
-      },
-      "WidgetTree.WBP_TargetSelectionDraw": {
-        "enabled": false,
-        "scale": 1,
-        "x": 0,
-        "y": 0
-      }
-    },
+    "components": null,
+    "coordinateRevision": 2,
     "groups": {
       "info": {
         "enabled": true,
-        "scale": 0.6,
-        "x": 124,
-        "y": -80
+        "scale": 0.6330000162124634,
+        "x": -275.0,
+        "y": 0
       },
       "ladder": {
         "enabled": true,
-        "scale": 0.75,
-        "x": 24,
-        "y": 27
+        "scale": 0.6669999957084656,
+        "x": 0,
+        "y": 0
       },
       "radar": {
         "enabled": true,
-        "scale": 0.76,
-        "x": -220,
-        "y": 45.72210714885517
+        "scale": 0.8499999999999999,
+        "x": -115.0,
+        "y": 0
       }
     },
     "simpleGroups": {
-      "mission": {
+      "fpm": {
         "x": 0,
         "y": 0
+      },
+      "mission": {
+        "scale": 0.8500000238418579,
+        "x": -61.0,
+        "y": 0.0
       },
       "orders": {
         "x": 0,
@@ -339,16 +144,15 @@
         "y": 0
       },
       "wingman": {
-        "x": 0,
+        "scale": 0.8500000238418579,
+        "x": 63.0,
         "y": 0
       }
     },
-    "simpleTargetBase": {
-      "scope": "HorizontalBox:HorizontalBox_1",
-      "sx": 0.7,
-      "sy": 0.7,
-      "x": -304.85000127487,
-      "y": 1776.9188741010937
+    "weaponCalibration": {
+      "bombFov": 12.5,
+      "bombY": 0,
+      "saamScale": 1
     }
   },
   "version": 1

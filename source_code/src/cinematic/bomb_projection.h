@@ -7,6 +7,7 @@
 #include <fstream>
 #include <algorithm>
 #include <sstream>
+#include "weapon-surface.h"
 // Native LiveExplosivePredicationWidget draw slot165 calls both trajectory and
 // landing-circle helpers. Keep all game geometry/ballistics and native screen
 // conversion, but use the normal camera lens and pose within ONLY this draw.
@@ -19,7 +20,7 @@ inline thread_local Scope scope{};
 inline thread_local Object scopedCanvas=nullptr,scopedWidget=nullptr;
 inline const UEVR_PluginInitializeParam* host=nullptr;
 inline Draw original=nullptr;
-inline std::atomic<double> fovAdjustmentDegrees=0;
+inline std::atomic<double> fovAdjustmentDegrees=0,verticalOffset=0;
 inline std::atomic<bool> calibrationEnabled=false;
 inline bool installed=false;
 inline UEVR_UClassHandle widgetClass=nullptr,canvasClass=nullptr;
@@ -42,8 +43,9 @@ inline void calibrationControl(const char* event,const char* data){
  if(!event||std::strcmp(event,"AC8_BombProjectionControls")||!data)return;
  int enabled=0,keyboard=0,flight=0;double adjustment=0;char a=0,b=0,c=0;std::istringstream in(data);
  if(!(in>>enabled>>a>>adjustment>>b>>keyboard>>c>>flight)||a!='|'||b!='|'||c!='|'||(enabled!=0&&enabled!=1)||(keyboard!=0&&keyboard!=1)||(flight!=0&&flight!=1)||!std::isfinite(adjustment)||adjustment< -40||adjustment>40)return;
- in>>std::ws;if(!in.eof())return;
- fovAdjustmentDegrees=adjustment;calibrationEnabled=enabled!=0;
+ double vertical=0;in>>std::ws;
+ if(!in.eof()){char separator=0;if(!(in>>separator>>vertical)||separator!='|'||!std::isfinite(vertical)||std::abs(vertical)>4000)return;in>>std::ws;if(!in.eof())return;}
+ fovAdjustmentDegrees=adjustment;verticalOffset=vertical;calibrationEnabled=enabled!=0;
 }
 template<class T> inline bool read(const void* p,T& value){SIZE_T n=0;return p&&ReadProcessMemory(GetCurrentProcess(),p,&value,sizeof(value),&n)&&n==sizeof(value);}
 inline Object reference(Object o,const wchar_t* name){Object value=nullptr;if(o)read(host->sdk->uobject->get_property_data(o,name),value);return value;}
@@ -70,6 +72,9 @@ inline void wrapper(Object widget,Object canvas){
  const auto oldScope=scope;const auto oldCanvas=scopedCanvas;const auto oldWidget=scopedWidget;const auto oldAttachment=originAttachment;Scope value{};
  scope=cameraLens(widget,canvas,value)?value:Scope{};
  scopedCanvas=scope.active?canvas:nullptr;scopedWidget=scope.active?widget:nullptr;originAttachment={};
+ const auto surface=scope.active?weapon_surface::snapshot(scope.width,scope.height):weapon_surface::Snapshot{};
+ Object renderer=nullptr;if(surface.changed)read(reinterpret_cast<const unsigned char*>(canvas)+0x190,renderer);
+ weapon_surface::Scope presentation(canvas,renderer,surface);
  struct Restore {Scope old;Object canvas,widget;OriginAttachment attachment;~Restore(){scope=old;scopedCanvas=canvas;scopedWidget=widget;originAttachment=attachment;}}restore{oldScope,oldCanvas,oldWidget,oldAttachment};
  if(original)original(widget,canvas);
 }
@@ -77,12 +82,12 @@ inline void wrapper(Object widget,Object canvas){
 inline bool initialize(const UEVR_PluginInitializeParam* p){
     host=p;if(!p||!p->sdk||!p->vr||!p->vr->get_ui_width||!p->vr->get_ui_height||!p->callbacks||!p->callbacks->on_custom_event)return false;
     auto* sdk=p->sdk;if(!sdk->uobject||!sdk->uobject->is_a||!sdk->uobject_array||!sdk->ustruct||!sdk->fproperty||!sdk->functions||!sdk->callbacks)return false;
-    auto module=GetModuleHandleW(nullptr);wchar_t path[32768]{};std::string hash;std::array<unsigned char,32> bytes{};
-    if(!module||!GetModuleFileNameW(module,path,32768)||!boundary::cached_module_file_hash(module,path,hash)||hash!="51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F"||
-       !read(reinterpret_cast<unsigned char*>(module)+drawRva,bytes)||bytes!=drawHead){return false;}
+    auto module=GetModuleHandleW(nullptr);std::array<unsigned char,32> bytes{};
+    if(!module||!ac8_game_compatibility::allowed("bomb")||
+       !ac8_game_compatibility::copy_verified_source(reinterpret_cast<unsigned char*>(module)+ac8_game_compatibility::rva<drawRva>(),bytes,drawHead)||bytes!=drawHead){return false;}
     // V65 retains the verified current-bomb draw scope but retires V64's
     // unobserved stereo lens/pose corrections. Only bomb_circle.h writes now.
-    const int id=p->functions->register_inline_hook(reinterpret_cast<unsigned char*>(module)+drawRva,reinterpret_cast<void*>(&wrapper),reinterpret_cast<void**>(&original));
+    const int id=p->functions->register_inline_hook(reinterpret_cast<unsigned char*>(module)+ac8_game_compatibility::rva<drawRva>(),reinterpret_cast<void*>(&wrapper),reinterpret_cast<void**>(&original));
     installed=id>=0&&original;if(!installed&&id>=0)p->functions->unregister_inline_hook(id);
     return installed;
 }

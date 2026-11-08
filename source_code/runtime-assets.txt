@@ -42,3 +42,6 @@ pso-4280-PS.dxbc
 pso-4280-VS.dxbc
 pso-4281-PS.dxbc
 pso-4281-VS.dxbc
+AC8_VR-identity-filter-PS.dxbc
+AC8_VR-sharp-layer-PS.dxbc
+AC8_VR-sharp-base-PS.dxbc

@@ -29,37 +29,25 @@ float4 ScenePS(SceneVertex i) : SV_Target {
     float2 uv=hudUV*ViewPortScaler.xy;
     float4 policy=PolicyMask.Sample(BilinearClampSampler,hudUV);
     float4 original=Sharp.Sample(BilinearClampSampler,hudUV);
-    float4 combine=lerp(CombineColorTexture.Sample(BilinearClampSampler,uv),original,policy.r);
-    // Captured flat-screen rectangles do not follow relocated widgets or pause
-    // layouts. Alpha exceeding premultiplied emission identifies dark coverage
-    // in the current source itself; pure emissive text keeps the common blend.
-    bool emissiveBar=policy.b>0.5 && policy.r>0.5 && original.g>original.r*1.2 && original.g>original.b*1.2;
-    bool planeEmission=policy.b>0.5 && policy.r<0.5;
-    // A flattened full-screen HUD fade can begin before the loading-state event.
-    // Its opaque black coverage wins over artwork emission. Ordinary flight
-    // has zero global fade and uses exactly the existing artwork blend.
-    bool coveredArtwork=planeEmission && i.fade>0 && BlackFadeCoverage(original)>0;
-    planeEmission=planeEmission&&!coveredArtwork;
-    bool sharpEmission=policy.b>1.5 && policy.b<2.5;
-    bool borderEmission=policy.b>2.5 && policy.b<3.5;
-    bool inside=HasDarkCoverage(combine)&&!emissiveBar&&!planeEmission&&!sharpEmission;
-    bool radio=false;
+    float4 combine=CombineColorTexture.Sample(BilinearClampSampler,uv);
+    // Only accepted radar geometry selects this special native blend.
+    bool inside=policy.b>=0.5; // owned radar geometry selects native alpha branch
+    bool radio=false; // no subtitle layout rectangle
     bool alphaBlend=SceneBlendPattern>0||inside;
     bool menu=SceneBlendPattern==3,replay=SceneBlendPattern==2;
     float rate=clamp(1-dot(scene.rgb,luminance),0.2,1);
-    if(radio)rate=RadioPortraitLuminanceRate;if(alphaBlend)rate=1;
-    float4 first=FirstGlowTexture.Sample(BilinearClampSampler,uv)*GlowIntensity*rate*(1-policy.r);
+    // Preserve the accepted retained-HUD light response. Selected sharp
+    // coverage is applied after this scene/glow blend without region switches.
+    if(alphaBlend)rate=1;
+    float4 first=FirstGlowTexture.Sample(BilinearClampSampler,uv)*GlowIntensity*rate;
     first.a=saturate(dot(first.rgb,luminance));
     float4 base=float4(combine.rgb+first.rgb,combine.a+first.a*(1-combine.a));
-    float4 secondary=SecondaryGlowTexture.Sample(BilinearClampSampler,uv)*SecondaryGlowIntensity*rate*(1-policy.r);
+    float4 secondary=SecondaryGlowTexture.Sample(BilinearClampSampler,uv)*SecondaryGlowIntensity*rate;
     secondary.a=dot(secondary.rgb,luminance);
-    float4 additive=AdditionalGlowTexture.Sample(BilinearClampSampler,uv)*rate*(1-policy.r);
-    float3 secondaryRGB=0;
-    if(!replay){
-        // No extra decorative dots on HUD, tutorials, movies or input prompts.
-        secondaryRGB=secondary.rgb;
-    }else secondaryRGB=secondary.rgb+additive.rgb;
-    float4 empty=EmptyLayerTexture.Sample(BilinearClampSampler,uv);
+    float4 additive=AdditionalGlowTexture.Sample(BilinearClampSampler,uv)*rate;
+    float3 secondaryRGB=DecoratedSecondary(secondary,uv);
+    if(replay)secondaryRGB+=additive.rgb;
+    float4 empty=float4(0,0,0,0);
     float4 core=empty*rate,depth=empty*rate,normal=empty*rate*BlendOpacity;
     float4 color=0;
     if((alphaBlend||radio)&&!menu){
@@ -68,16 +56,16 @@ float4 ScenePS(SceneVertex i) : SV_Target {
         color.rgb=color.rgb*(1-saturate(dot(secondaryRGB,luminance)))+secondaryRGB;
     }else{
         float neighborhood=GetIntentsityAdjustedByNeighborhood(CombineColorTexture,BilinearClampSampler,uv,float2(1.0/2560,1.0/1440),luminance);
-        color=BlendGlowToScene(SoftLightTexture.Sample(BilinearClampSampler,uv)*(1-policy.r),depth,additive,core,base,float4(scene.rgb,1),neighborhood,menu);
+        color=BlendGlowToScene(SoftLightTexture.Sample(BilinearClampSampler,uv),depth,additive,core,base,float4(scene.rgb,1),neighborhood,menu);
         color=color*(1-normal.a)+normal;color.rgb+=secondaryRGB;
     }
-    color.rgb=lerp(color.rgb,scene.rgb+original.rgb,(emissiveBar||sharpEmission)?policy.r:0);
-    // Narrow border: one controlled emissive contribution, without the native
-    // neighborhood/soft-light amplification. The original picture is separate.
-    float3 borderColor=scene.rgb+BorderEmissionRGB(original.rgb*rate,first.rgb+secondaryRGB+additive.rgb);
-    color.rgb=lerp(color.rgb,borderColor,borderEmission?saturate(original.a*8):0);
-    // Preserve the stored premultiplied sharp copy and coverage; live alpha
-    // sufficiency remains a single portrait test, never an opaque PNG inference.
+    // Sole rectangle policy: remove all generated glow inside the current
+    // portrait bounds AFTER blur; composite stored premultiplied sharp UI onto
+    // the unmodified eye background. Portrait remains in the glow source.
+    // Radar already used its native alpha branch, retaining decorated glow.
+    // Only the accepted portrait receives this final sharp-only override.
+    float4 noGlow=SharpNoGlowLayer.Sample(BilinearClampSampler,hudUV);
+    color.rgb=color.rgb*(1-noGlow.a)+noGlow.rgb;
     color.rgb=lerp(color.rgb,original.rgb+scene.rgb*(1-original.a),policy.g);
     // UNORM targets clamp automatically. Float eye surfaces retain scene HDR
     // headroom instead of clipping the entire eye to SDR during HUD blending.

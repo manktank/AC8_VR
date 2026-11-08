@@ -1,5 +1,5 @@
 // Compose the HUD against each current eye image using the validated curved
-// HUD mapping. Scene backup and output resources belong to this renderer;
+// HUD mapping. The renderer owns the backup and optional format-fallback output;
 // OpenXR image ownership and command submission remain with the host bridge.
 
 #pragma once
@@ -35,10 +35,15 @@ class Renderer {
     }
 public:
     static bool supported(ID3D12Resource* r){return r&&surface_formats::render_target(r->GetDesc());}
-    bool compatible(ID3D12Resource* scene)const{return supported(scene)&&scene->GetDesc().Width==width_&&scene->GetDesc().Height==height_&&surface_formats::view(scene->GetDesc().Format)==format_;}
+    static bool directTarget(const D3D12_RESOURCE_DESC& desc){
+        const auto view=surface_formats::view(desc.Format);
+        return view!=DXGI_FORMAT_UNKNOWN&&
+            (desc.Format==view||desc.Format==surface_formats::storage(desc.Format));
+    }
+    bool compatible(ID3D12Resource* scene)const{return supported(scene)&&scene->GetDesc().Width==width_&&scene->GetDesc().Height==height_&&surface_formats::view(scene->GetDesc().Format)==format_&&directTarget(scene->GetDesc())==(output_.Get()==nullptr);}
     Renderer(ID3D12Device* d,const std::filesystem::path& assets,hud_route_glow::Renderer& glow,ID3D12Resource* scene):device_(d){
         if(!supported(scene))throw std::runtime_error("Unsupported scene format");const auto desc=scene->GetDesc();width_=static_cast<UINT>(desc.Width);height_=desc.Height;format_=surface_formats::view(desc.Format);
-        D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=10;
+        D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=11;
         D3D12_ROOT_PARAMETER p[4]{};p[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;p[0].DescriptorTable={1,&range};p[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
         for(UINT i=1;i<4;++i){p[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;p[i].Descriptor.ShaderRegister=i-1;p[i].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;}
         D3D12_STATIC_SAMPLER_DESC s[2]{};
@@ -53,23 +58,23 @@ public:
         native_generation::check(d->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&pso_)));
         auto td=desc;td.Format=surface_formats::storage(desc.Format);td.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
         native_generation::check(d->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&td,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&snapshot_)));
-        native_generation::check(d->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&td,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&output_)));
-        D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=1024;buffer.Height=1;buffer.DepthOrArraySize=buffer.MipLevels=1;buffer.SampleDesc.Count=1;buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;heap.Type=D3D12_HEAP_TYPE_UPLOAD;
+        if(!directTarget(desc))native_generation::check(d->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&td,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,nullptr,IID_PPV_ARGS(&output_)));
+        D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=1536;buffer.Height=1;buffer.DepthOrArraySize=buffer.MipLevels=1;buffer.SampleDesc.Count=1;buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;heap.Type=D3D12_HEAP_TYPE_UPLOAD;
         for(auto& slot:slots_)native_generation::check(d->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&slot.mapping)));
-        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=10;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;native_generation::check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&srv_)));
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=11;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;native_generation::check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&srv_)));
         const UINT stride=d->GetDescriptorHandleIncrementSize(hd.Type);
-        for(UINT i=0;i<10;++i){D3D12_SHADER_RESOURCE_VIEW_DESC view{};view.Format=i==6?DXGI_FORMAT_BC7_UNORM_SRGB:i==9?DXGI_FORMAT_R16G16B16A16_FLOAT:i==0?glow.sourceView():i==8?format_:DXGI_FORMAT_R8G8B8A8_UNORM;
+        for(UINT i=0;i<11;++i){D3D12_SHADER_RESOURCE_VIEW_DESC view{};view.Format=i==6?DXGI_FORMAT_BC7_UNORM_SRGB:i==9?DXGI_FORMAT_R16G16B16A16_FLOAT:(i==0||i==10)?glow.sourceView():i==8?format_:DXGI_FORMAT_R8G8B8A8_UNORM;
             view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;view.Texture2D.MipLevels=i==6?8:1;d->CreateShaderResourceView(i==8?snapshot_.Get():glow.input(i),&view,{srv_->GetCPUDescriptorHandleForHeapStart().ptr+size_t(i)*stride});}
         hd={};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=2;
         for(auto& slot:slots_){
-            native_generation::check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&slot.rtv)));D3D12_RENDER_TARGET_VIEW_DESC view{};view.Format=format_;view.ViewDimension=D3D12_RTV_DIMENSION_TEXTURE2D;d->CreateRenderTargetView(output_.Get(),&view,slot.rtv->GetCPUDescriptorHandleForHeapStart());
+            native_generation::check(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&slot.rtv)));
             native_generation::check(d->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&slot.allocator)));
             native_generation::check(d->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,slot.allocator.Get(),nullptr,IID_PPV_ARGS(&slot.list)));native_generation::check(slot.list->Close());
         }
     }
     // Four bounded CPU recording slots share queue-serialized GPU textures. Each
     // allocator, geometry upload, HUD descriptor and image pin has its own fence.
-    bool record(hud_route_glow::Renderer& glow,ID3D12Resource* scene,ID3D12Resource* hud,const current_geometry::Snapshot& g,ID3D12Fence* fence=nullptr){
+    bool record(hud_route_glow::Renderer& glow,ID3D12Resource* scene,ID3D12Resource* hud,const current_geometry::Snapshot& g,ID3D12Fence* fence=nullptr,bool menu_presentation=false){
         if(!compatible(scene)||!supported(hud)||scene==hud||hud->GetDesc().Width!=g.hud_width||hud->GetDesc().Height!=g.hud_height)return false;
         busy_=false;const uint64_t completed=fence?fence->GetCompletedValue():0;
         if(completed==UINT64_MAX)return false;
@@ -81,10 +86,20 @@ public:
         current_geometry::Constants constants[2]{};const float bounds[4]{0,0,1,1};
         for(unsigned eye=0;eye<2;++eye){if(!current_geometry::constants(g,eye,g.frame,g.layout,bounds,constants[eye]))return false;
             constants[eye].eye_rectangle[0]=float(g.eyes[eye].subImage.imageRect.offset.x);constants[eye].eye_rectangle[1]=float(g.eyes[eye].subImage.imageRect.offset.y);}
-        void* data=nullptr;D3D12_RANGE no_read{0,0};native_generation::check(slot.mapping->Map(0,&no_read,&data));std::memset(data,0,1024);
+        void* data=nullptr;D3D12_RANGE no_read{0,0};native_generation::check(slot.mapping->Map(0,&no_read,&data));std::memset(data,0,1536);
+        // The captured constants describe flight (SceneBlendPattern=0), which
+        // ignores black-panel alpha. Use the authored menu branch immediately
+        // when the existing gameplay lifecycle reports pause/menu presentation;
+        // background coverage must not wait for exclusion-tree discovery. Only
+        // this uint changes. Fence-owned uploads prevent changing constants
+        // beneath an earlier flight/menu submission still running on the GPU.
+        std::memcpy(static_cast<unsigned char*>(data)+1024,glow.authoredParameters().data(),288);
+        if(menu_presentation){const uint32_t menu=3;std::memcpy(static_cast<unsigned char*>(data)+1024+280,&menu,sizeof(menu));}
         for(unsigned eye=0;eye<2;++eye){std::memcpy(static_cast<unsigned char*>(data)+eye*512,&constants[eye],112);std::memcpy(static_cast<unsigned char*>(data)+eye*512+256,constants[eye].source_scale_bias,32);}slot.mapping->Unmap(0,nullptr);
         D3D12_RENDER_TARGET_VIEW_DESC view{};view.Format=surface_formats::view(hud->GetDesc().Format);view.ViewDimension=D3D12_RTV_DIMENSION_TEXTURE2D;
         const auto base=slot.rtv->GetCPUDescriptorHandleForHeapStart();const D3D12_CPU_DESCRIPTOR_HANDLE hud_handle{base.ptr+device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV)};device_->CreateRenderTargetView(hud,&view,hud_handle);
+        view.Format=format_;
+        device_->CreateRenderTargetView(output_?output_.Get():scene,&view,base);
         native_generation::check(slot.allocator->Reset());native_generation::check(slot.list->Reset(slot.allocator.Get(),nullptr));auto* l=slot.list.Get();
         static_cast<void>(0);
         {
@@ -93,16 +108,32 @@ public:
         transition(l,scene,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);transition(l,snapshot_.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);l->CopyResource(snapshot_.Get(),scene);
         }
         {
-        transition(l,snapshot_.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COPY_SOURCE);transition(l,output_.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);l->CopyResource(output_.Get(),snapshot_.Get());
+        if(output_){
+            transition(l,snapshot_.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COPY_SOURCE);
+            transition(l,output_.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+            l->CopyResource(output_.Get(),snapshot_.Get());
+        }
         }
         {
-        transition(l,snapshot_.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);transition(l,output_.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_RENDER_TARGET);
+        if(output_){
+            transition(l,snapshot_.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transition(l,output_.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }else{
+            transition(l,snapshot_.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transition(l,scene,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }
         transition(l,glow.input(0),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE|D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        ID3D12DescriptorHeap* descriptor=srv_.Get();l->SetDescriptorHeaps(1,&descriptor);l->SetGraphicsRootSignature(root_.Get());l->SetPipelineState(pso_.Get());l->SetGraphicsRootDescriptorTable(0,srv_->GetGPUDescriptorHandleForHeapStart());l->SetGraphicsRootConstantBufferView(1,glow.parameters()->GetGPUVirtualAddress());l->OMSetRenderTargets(1,&base,FALSE,nullptr);l->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D12DescriptorHeap* descriptor=srv_.Get();l->SetDescriptorHeaps(1,&descriptor);l->SetGraphicsRootSignature(root_.Get());l->SetPipelineState(pso_.Get());l->SetGraphicsRootDescriptorTable(0,srv_->GetGPUDescriptorHandleForHeapStart());l->SetGraphicsRootConstantBufferView(1,slot.mapping->GetGPUVirtualAddress()+1024);l->OMSetRenderTargets(1,&base,FALSE,nullptr);l->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         for(unsigned eye=0;eye<2;++eye){const auto& r=g.eyes[eye].subImage.imageRect;const D3D12_VIEWPORT viewport{float(r.offset.x),float(r.offset.y),float(r.extent.width),float(r.extent.height),0,1};const D3D12_RECT scissor{r.offset.x,r.offset.y,r.offset.x+r.extent.width,r.offset.y+r.extent.height};l->RSSetViewports(1,&viewport);l->RSSetScissorRects(1,&scissor);l->SetGraphicsRootConstantBufferView(2,slot.mapping->GetGPUVirtualAddress()+eye*512);l->SetGraphicsRootConstantBufferView(3,slot.mapping->GetGPUVirtualAddress()+eye*512+256);l->DrawInstanced(3,1,0,0);}
         }
         {
-        transition(l,output_.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);transition(l,scene,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COPY_DEST);l->CopyResource(scene,output_.Get());transition(l,scene,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_RENDER_TARGET);transition(l,output_.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if(output_){
+            transition(l,output_.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
+            transition(l,scene,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+            l->CopyResource(scene,output_.Get());
+            transition(l,scene,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_RENDER_TARGET);
+            transition(l,output_.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
         transition(l,glow.input(0),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE|D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
         {

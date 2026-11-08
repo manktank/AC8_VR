@@ -11,11 +11,69 @@ using TextDraw=void(*)(UEVR_UObjectHandle,const void*,const void*,const Point*,u
 inline TextDraw originalText=nullptr;
 inline uintptr_t gameBase=0;
 
-struct TargetContext { UEVR_UObjectHandle widget,canvas;uint64_t bits;bool moved=false;Point shift{}; };
+// Current-HUD locator anchor; values are normalized HUD coordinates, never
+// display-resolution constants. Existing authored and manual offsets remain.
+struct Anchor {UEVR_UObjectHandle hud=nullptr;double u=.5,v=.5,scale=1;};
+inline std::mutex anchorMutex;
+inline Anchor anchor;
+inline std::atomic<bool> anchorEnabled{false};
+inline bool live(UEVR_UObjectHandle o){return o&&host&&host->sdk&&host->sdk->uobject_hook&&host->sdk->uobject_hook->exists&&host->sdk->uobject_hook->exists(o);}
+inline std::wstring objectName(UEVR_UObjectHandle o){
+ if(!live(o))return {};
+ wchar_t text[1024]{};host->sdk->fname->to_string(host->sdk->uobject->get_fname(o),text,1024);return text;
+}
+inline std::wstring identity(UEVR_UObjectHandle o){
+ std::wstring result;std::array<UEVR_UObjectHandle,32> seen{};
+ const auto cls=live(o)?host->sdk->uobject->get_class(o):nullptr;
+ const auto prefix=objectName(reinterpret_cast<UEVR_UObjectHandle>(cls));
+ if(prefix.empty())return {};
+ for(unsigned depth=0;o&&depth<seen.size();++depth){
+  if(!live(o))return {};
+  for(unsigned i=0;i<depth;++i)if(seen[i]==o)return {};
+  seen[depth]=o;const auto leaf=objectName(o);if(leaf.empty())return {};
+  result=leaf+(result.empty()?L"":L"."+result);
+  if(result.size()>8192)return {};
+  o=host->sdk->uobject->get_outer(o);if(!o)return prefix+L" "+result;
+ }
+ return {};
+}
+inline UEVR_UObjectHandle reference(UEVR_UObjectHandle o,const wchar_t* key){
+ UEVR_UObjectHandle result=nullptr;
+ if(live(o)&&host->sdk->uobject->get_property_data)read(host->sdk->uobject->get_property_data(o,key),result);
+ return live(result)?result:nullptr;
+}
+inline UEVR_UObjectHandle currentHUD(){
+ auto s=host?host->sdk:nullptr;
+ return s&&s->functions&&s->functions->get_player_controller?reference(s->functions->get_player_controller(0),L"MyHUD"):nullptr;
+}
+inline void anchorEvent(const char* data){
+ Anchor next;
+ if(data&&std::strcmp(data,"off")){
+  std::string text(data);if(text.size()>32768)return;
+  std::istringstream in(text);char a=0,b=0,c=0;std::string owner;
+  if(!(in>>next.u>>a>>next.v>>b>>next.scale>>c)||a!='|'||b!='|'||c!='|'||!std::getline(in,owner)||
+     !std::isfinite(next.u+next.v+next.scale)||next.u<0||next.u>1||next.v<0||next.v>1||next.scale<.1||next.scale>3)return;
+  const int count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,owner.data(),static_cast<int>(owner.size()),nullptr,0);
+  if(count<=0)return;
+  std::wstring wide(static_cast<size_t>(count),L'\0');
+  if(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,owner.data(),static_cast<int>(owner.size()),wide.data(),count)!=count)return;
+  next.hud=currentHUD();if(!next.hud||identity(next.hud)!=wide)return;
+ }
+ std::lock_guard<std::mutex> lock(anchorMutex);anchor=next;anchorEnabled=next.hud!=nullptr;
+}
+inline Anchor anchorFor(UEVR_UObjectHandle widget){
+ if(!anchorEnabled.load())return {};
+ Anchor value;{std::lock_guard<std::mutex> lock(anchorMutex);value=anchor;}
+ if(value.hud&&(currentHUD()!=value.hud||reference(widget,L"CachedLiveHUD")!=value.hud))return {};
+ return value;
+}
+
+struct ResolutionMap {bool active=false;unsigned char kind=1;Point eye{},ui{},pixelTrim{};};
+struct TargetContext { UEVR_UObjectHandle widget,canvas;uint64_t bits;bool moved=false;Point shift{};Anchor anchor;bool anchorMapped=false;ResolutionMap resolution; };
 inline thread_local TargetContext* currentTarget=nullptr;
 struct TargetScope {
  TargetContext value;TargetContext* prior;
- TargetScope(UEVR_UObjectHandle w,UEVR_UObjectHandle c):value{w,c,packedBits()},prior(currentTarget){currentTarget=&value;}
+ TargetScope(UEVR_UObjectHandle w,UEVR_UObjectHandle c,unsigned char kind=1);
  static uint64_t packedBits();
  ~TargetScope(){currentTarget=prior;}
  TargetScope(const TargetScope&)=delete;TargetScope& operator=(const TargetScope&)=delete;
@@ -33,13 +91,18 @@ inline Point delta(uint64_t bits,unsigned char kind){
  int16_t sx=0,sy=0;std::memcpy(&sx,&x,2);std::memcpy(&sy,&y,2);
  return{sx/10.0,sy/10.0};
 }
+#include "locator-resolution.h"
+inline TargetScope::TargetScope(UEVR_UObjectHandle w,UEVR_UObjectHandle c,unsigned char kind)
+ :value{w,c,packedBits(),false,{},anchorFor(w),false,{}},prior(currentTarget){
+ currentTarget=&value;resolution::prepare(value,kind);
+}
 inline void notify(){
  if(host&&host->functions&&host->functions->dispatch_lua_event)
   host->functions->dispatch_lua_event("AC8_ArrowLiveStatus",installed?"ready":!std::strcmp(state.load(),"waiting")?"waiting":"unavailable");
 }
 
 inline void event(const char* name,const char* data){
- if(name&&!std::strcmp(name,"AC8_ArrowLiveSnapshot")){static_cast<void>(0);return;}
+ if(name&&!std::strcmp(name,"AC8_LocatorGeometryAnchor")){anchorEvent(data);return;}
  if(!name||!data||std::strcmp(name,"AC8_ArrowLiveControls"))return;
  if(!std::strcmp(data,"query")){notify();return;}
  if(!std::strcmp(data,"off")){packed=0;return;}
@@ -59,10 +122,18 @@ inline void draw(UEVR_UObjectHandle widget,UEVR_UObjectHandle canvas,unsigned ch
  const auto fn=original;if(!fn)return;
  const auto ctx=currentTarget;
  const auto bits=(kind==1&&ctx&&ctx->widget==widget&&ctx->canvas==canvas)?ctx->bits:packed.load(std::memory_order_relaxed);
+ if(ctx&&ctx->resolution.active&&ctx->widget==widget&&ctx->canvas==canvas&&ctx->resolution.kind==kind){
+  fn(widget,canvas,kind,size,projection,thickness,color,shapeScale,offset);return;
+ }
  // Zero offsets preserve the original pointers/arguments without any memory
  // probing, coordinate lookup, counters, array walk or property writes.
- if(!bits||kind>1){fn(widget,canvas,kind,size,projection,thickness,color,shapeScale,offset);return;}
- const auto shift=delta(bits,kind);Point prior{},moved{};const Point* selected=offset;
+ if((!bits&&(!ctx||!ctx->anchor.hud))||kind>1){fn(widget,canvas,kind,size,projection,thickness,color,shapeScale,offset);return;}
+ auto shift=delta(bits,kind);Point dimensions{};
+ if(ctx&&ctx->widget==widget&&ctx->canvas==canvas&&ctx->anchor.hud&&read(size,dimensions)&&
+    std::isfinite(dimensions.x+dimensions.y)&&dimensions.x>0&&dimensions.y>0&&dimensions.x<100000&&dimensions.y<100000){
+  ctx->anchorMapped=true;shift.x+=(ctx->anchor.u-.5)*dimensions.x;shift.y+=(ctx->anchor.v-.5)*dimensions.y;
+ }
+ Point prior{},moved{};const Point* selected=offset;
  if((shift.x!=0||shift.y!=0)&&read(offset,prior)&&shiftedPoint(prior,shift,moved)){
   selected=&moved;static_cast<void>(0);
   if(kind==1&&ctx&&ctx->widget==widget&&ctx->canvas==canvas){ctx->moved=true;ctx->shift=shift;}
@@ -75,7 +146,7 @@ inline void draw(UEVR_UObjectHandle widget,UEVR_UObjectHandle canvas,unsigned ch
 inline bool textSite(uintptr_t site){
  if(!gameBase)return false;
  const auto at=site-gameBase;
- return at==bodyRva+0x86c||at==bodyRva+0x8c0||at==bodyRva+0x91c||at==bodyRva+0xbe0;
+ return at==ac8_game_compatibility::rva<bodyRva+0x86c>()||at==ac8_game_compatibility::rva<bodyRva+0x8c0>()||at==ac8_game_compatibility::rva<bodyRva+0x91c>()||at==ac8_game_compatibility::rva<bodyRva+0xbe0>();
 }
 inline void textAt(uintptr_t site,UEVR_UObjectHandle canvas,const void* text,const void* color,const Point* position,
  uint64_t a5,uint64_t a6,uint64_t a7,const Point* alignment,unsigned char convert,unsigned char low,int font){
@@ -85,7 +156,7 @@ inline void textAt(uintptr_t site,UEVR_UObjectHandle canvas,const void* text,con
  // coordinates, then adds authored text offsets. The arrow offset is in those
  // same viewport-local units. Translate only the position; retain font/color,
  // alignment, priority and all opaque native stack inputs byte-for-byte.
- if(ctx&&ctx->moved&&ctx->canvas==canvas&&!convert&&textSite(site)&&
+ if(ctx&&!ctx->resolution.active&&ctx->moved&&ctx->canvas==canvas&&!convert&&textSite(site)&&
     read(position,prior)&&shiftedPoint(prior,ctx->shift,moved)){
   selected=&moved;static_cast<void>(0);
  }
@@ -96,16 +167,17 @@ __declspec(noinline) inline void drawText(UEVR_UObjectHandle canvas,const void* 
  textAt(reinterpret_cast<uintptr_t>(_ReturnAddress()),canvas,text,color,position,a5,a6,a7,alignment,convert,low,font);
 }
 inline void initialize(unsigned char* base){
- if(!codeMatches(base+rva,head)||!codeMatches(base+textRva,textHead)){state="code_guard_failed";return;}
+ if(!codeMatches(base+ac8_game_compatibility::translate(rva),head)||!codeMatches(base+ac8_game_compatibility::rva<textRva>(),textHead)){state="code_guard_failed";return;}
  gameBase=reinterpret_cast<uintptr_t>(base);
- const int hook=host->functions->register_inline_hook(base+rva,reinterpret_cast<void*>(&draw),reinterpret_cast<void**>(&original));
- const int textHook=host->functions->register_inline_hook(base+textRva,reinterpret_cast<void*>(&drawText),reinterpret_cast<void**>(&originalText));
+ const int hook=host->functions->register_inline_hook(base+ac8_game_compatibility::translate(rva),reinterpret_cast<void*>(&draw),reinterpret_cast<void**>(&original));
+ const int textHook=host->functions->register_inline_hook(base+ac8_game_compatibility::rva<textRva>(),reinterpret_cast<void*>(&drawText),reinterpret_cast<void**>(&originalText));
  installed=hook>=0&&original&&textHook>=0&&originalText;
  if(!installed){
   if(hook>=0)host->functions->unregister_inline_hook(hook);
   if(textHook>=0)host->functions->unregister_inline_hook(textHook);
   original=nullptr;originalText=nullptr;
  }
+ if(installed)resolution::initialize(base);
  state=installed?"additive_offsets_and_target_text":"hook_unavailable";
 }
 } // namespace live_controls

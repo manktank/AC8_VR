@@ -1,14 +1,13 @@
-Fresh-install runtime files, relative to AceCombat8. Core is required. The seven other Lua modules are optional. VERSION is source/release metadata, not a required runtime file.
+Fresh-install runtime files relative to AceCombat8. Keep Core enabled. The other seven scripts are optional.
 
-README.txt
 config.txt
 cvars_data.txt
 data/AC8_VR-AircraftPresets.json
 data/AC8_VR-ArrowLiveControls.json
 data/AC8_VR-BombLandingControls.json
 data/AC8_VR-EscortDrawScaleEnabled.flag
-data/AC8_VR-HUDDefaults.json
 data/AC8_VR-HangarCoverageControls.json
+data/AC8_VR-HUDDefaults.json
 data/AC8_VR-OffscreenGroupControls.json
 data/AC8_VR-PauseControls.json
 data/AC8_VR-TargetArrowShiftControls.json
@@ -16,6 +15,14 @@ data/AC8_VR-TargetSettings.json
 data/AC8_VR-WingmanStatusControls.json
 data/AC8_VR-WorkshopEffectControls.json
 data/AC8_VR-WorldTargetControls.json
+scripts/AC8_VR-AircraftPresets.lua
+scripts/AC8_VR-Cinematics_Hangar_Presentation.lua
+scripts/AC8_VR-Core.lua
+scripts/AC8_VR-HUD_Glow.lua
+scripts/AC8_VR-HUD_Layout.lua
+scripts/AC8_VR-Loading.lua
+scripts/AC8_VR-PlaneCamera.lua
+scripts/AC8_VR-Targets.lua
 plugins/AC8_VR-Features.bin
 plugins/AC8_VR-OpenXRBridge.dll
 plugins/AC8_VR-OpenXRLayer/AC8_VR-Glow.json
@@ -64,11 +71,6 @@ plugins/ac8-hud-assets/pso-4280-PS.dxbc
 plugins/ac8-hud-assets/pso-4280-VS.dxbc
 plugins/ac8-hud-assets/pso-4281-PS.dxbc
 plugins/ac8-hud-assets/pso-4281-VS.dxbc
-scripts/AC8_VR-AircraftPresets.lua
-scripts/AC8_VR-Cinematics_Hangar_Presentation.lua
-scripts/AC8_VR-Core.lua
-scripts/AC8_VR-HUD_Glow.lua
-scripts/AC8_VR-HUD_Layout.lua
-scripts/AC8_VR-Loading.lua
-scripts/AC8_VR-PlaneCamera.lua
-scripts/AC8_VR-Targets.lua
+plugins/ac8-hud-assets/AC8_VR-identity-filter-PS.dxbc
+plugins/ac8-hud-assets/AC8_VR-sharp-layer-PS.dxbc
+plugins/ac8-hud-assets/AC8_VR-sharp-base-PS.dxbc

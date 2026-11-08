@@ -96,7 +96,16 @@ public:
     }
     // Immutable snapshot must be COPY_SOURCE, same device, exact supported extent.
     // All owned textures begin and end PS_RESOURCE. No allocation or file IO here.
-    bool record(ID3D12GraphicsCommandList* list,ID3D12Resource* snapshot){
+    bool record(ID3D12GraphicsCommandList* list,ID3D12Resource* snapshot){return record_chain(list,snapshot,false);}
+    // Rebuild only the authored sharp/base combine AFTER glow generation. The
+    // blurred and soft-light outputs remain from the identity-selected input.
+    // Texture421 is scratch; the final base samples338, not the copied Sharp.
+    bool record_clean_base(ID3D12GraphicsCommandList* list,ID3D12Resource* snapshot){
+        if(stages.empty()||stages.front().spec.event!=3347||stages.front().spec.target!=338)return false;
+        return record_chain(list,snapshot,true);
+    }
+private:
+    bool record_chain(ID3D12GraphicsCommandList* list,ID3D12Resource* snapshot,bool base_only){
         if(!list||!snapshot)return false;const auto sd=snapshot->GetDesc();
         if(sd.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||sd.Width!=2560||sd.Height!=1338||sd.DepthOrArraySize!=1||sd.MipLevels!=1||sd.SampleDesc.Count!=1||
             (sd.Format!=DXGI_FORMAT_B8G8R8A8_UNORM&&sd.Format!=DXGI_FORMAT_B8G8R8A8_TYPELESS&&sd.Format!=DXGI_FORMAT_B8G8R8A8_UNORM_SRGB))return false;
@@ -105,7 +114,7 @@ public:
         {
         auto* input=textures.at(421).resource.Get();transition(list,input,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);list->CopyResource(input,snapshot);transition(list,input,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
-        for(int id:{317,1088}){auto& t=textures.at(id);transition(list,t.resource.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);const float zero[4]{};list->ClearRenderTargetView(t.rtv,zero,0,nullptr);transition(list,t.resource.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);}
+        if(!base_only)for(int id:{317,1088}){auto& t=textures.at(id);transition(list,t.resource.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);const float zero[4]{};list->ClearRenderTargetView(t.rtv,zero,0,nullptr);transition(list,t.resource.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);}
         const D3D12_VERTEX_BUFFER_VIEW vbv{vb->GetGPUVirtualAddress(),144,24};
         
         ID3D12DescriptorHeap* sharedHeaps[]={sharedSrvs.Get(),sharedSamplers.Get()};list->SetDescriptorHeaps(2,sharedHeaps);
@@ -116,8 +125,10 @@ public:
             if(spec.root==1033)list->SetGraphicsRootConstantBufferView(3,view->GetGPUVirtualAddress());if(stage.vertex)list->SetGraphicsRootConstantBufferView(static_cast<UINT>(spec.vertex_index),stage.vertex->GetGPUVirtualAddress());
             const D3D12_VIEWPORT vp{0,0,static_cast<float>(spec.width),static_cast<float>(spec.height),0,1};const D3D12_RECT rect{0,0,spec.width,spec.height};list->RSSetViewports(1,&vp);list->RSSetScissorRects(1,&rect);list->OMSetRenderTargets(1,&t.rtv,FALSE,nullptr);
             list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);list->IASetVertexBuffers(0,1,&vbv);list->DrawInstanced(6,1,0,0);transition(list,t.resource.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            if(base_only)break; // Only3347/338; never feed the complete base back into blur.
         }return true;
     }
+public:
     ID3D12Resource* output(int id)const{return textures.at(id).resource.Get();}
     ComPtr<ID3DBlob> cache(int event)const{
         for(const auto& stage:stages)if(stage.spec.event==event){ComPtr<ID3DBlob> blob;check(stage.pso->GetCachedBlob(&blob));return blob;}

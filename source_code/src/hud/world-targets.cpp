@@ -13,8 +13,10 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <string_view>
 #include <sstream>
 #include "../../vendor/uevr/plugin-api.h"
+#include "../backend/game-compatibility-runtime.h"
 static const UEVR_PluginInitializeParam* host=nullptr;
 static unsigned tickCount=0;
 template<class T> bool copy(const void* p,T& value){
@@ -25,9 +27,22 @@ static std::wstring billboardFname(UEVR_FNameHandle n){
 }
 static std::wstring objectName(UEVR_UObjectHandle o){
     if(!o)return L"";
-    std::wstring result=billboardFname(host->sdk->uobject->get_fname(o));
+    std::wstring parts[17];
+    size_t count=0,total=0;
+    parts[count]=billboardFname(host->sdk->uobject->get_fname(o));
+    total+=parts[count++].size();
     auto outer=host->sdk->uobject->get_outer(o);
-    for(int i=0;outer&&outer!=o&&i<16;++i){result=billboardFname(host->sdk->uobject->get_fname(outer))+L"."+result;outer=host->sdk->uobject->get_outer(outer);}
+    for(int i=0;outer&&outer!=o&&i<16;++i){
+        parts[count]=billboardFname(host->sdk->uobject->get_fname(outer));
+        total+=parts[count++].size()+1;
+        outer=host->sdk->uobject->get_outer(outer);
+    }
+    std::wstring result;
+    result.reserve(total);
+    for(size_t i=count;i-->0;){
+        result+=parts[i];
+        if(i)result+=L'.';
+    }
     return result;
 }
 

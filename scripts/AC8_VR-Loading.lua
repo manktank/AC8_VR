@@ -23,9 +23,10 @@ do
 local R=AC8Runtime
 local S={version=85,nextScan=0,active=false,reason='waiting'}
 R.missionLoading=S
+local function invokeMethod(o,k,...)return o[k](o,...)end
 local function call(o,k,...)
  if not o or(o~=uevr.api and not R.isLiveObject(o))then return end
- local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end
+ local ok,v=pcall(invokeMethod,o,k,...);if ok then return v end
 end
 local function full(o)return call(o,'get_full_name')end
 local function prop(o,k)return call(o,'get_property',k)end
@@ -59,8 +60,8 @@ local function update()
   end
  end
  if not S.subsystem then clear('no current loading subsystem');return end
- local root=prop(S.subsystem,'LoadingScreenRootWidget')
- if not(full(root)or''):match('^WBP_Loading_Root_000_C ')or full(call(root,'get_outer'))~=gin then clear('no owned loading root');return end
+ local root=prop(S.subsystem,'LoadingScreenRootWidget');local rootName=full(root)
+ if not(rootName or''):match('^WBP_Loading_Root_000_C ')or full(call(root,'get_outer'))~=gin then clear('no owned loading root');return end
  local screen=prop(root,'LoadingScreen');local name=full(screen)
  -- Narrow to the observed mission manager; startup, save/connect and other
  -- loading-screen types keep their existing behavior.
@@ -72,7 +73,7 @@ local function update()
   local n=full(current)
   if not n or seen[n]or not visible(current)then clear('mission screen hidden or stale');return end
   seen[n]=true
-  if n==full(root)then S.active=true;S.screen=screen;S.screenName=name;S.reason='owned visible mission loading screen';return end
+  if n==rootName then S.active=true;S.screen=screen;S.screenName=name;S.reason='owned visible mission loading screen';return end
   local parent=call(current,'GetParent')
   if not parent then
    local outer=call(current,'get_outer')
@@ -100,9 +101,10 @@ local old=rawget(_G,'AC8VRTransitions');if old then old.stopped=true end
 local S={version=88,binaryCover=true,stopped=false,ticks=0,elapsed=0,loading=false,opacity=0,
     customFadesDisabled=true,source='custom fades disabled',weaponMenus={}}
 rawset(_G,'AC8VRTransitions',S)
+local function invokeMethod(o,k,...)return o[k](o,...)end
 local function call(o,k,...)
     if not o or(o~=api and not AC8Runtime.isLiveObject(o))then return end
-    local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end
+    local ok,v=pcall(invokeMethod,o,k,...);if ok then return v end
 end
 local function full(o)return call(o,'get_full_name')end
 local function prop(o,k)return call(o,'get_property',k)end
@@ -195,11 +197,13 @@ registry.sections.loading_icon=function(R)
 do
 local R=AC8Runtime;local host=R.host('loading','center loading icon')
 local S={version=71,nextDiscover=0,rows={}};R.loadingIconCenter=S
+local function invokeMethod(o,k,...)return o[k](o,...)end
 local function call(o,k,...)
  if not o or(o~=uevr.api and not R.isLiveObject(o))then return end
- local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end
+ local ok,v=pcall(invokeMethod,o,k,...);if ok then return v end
 end
-local function field(o,k)local ok,v=pcall(function()return o[k]end);if ok then return v end end
+local function readField(o,k)return o[k]end
+local function field(o,k)local ok,v=pcall(readField,o,k);if ok then return v end end
 local function xy(v)
  local x,y=field(v,'X'),field(v,'Y');if type(x)=='number'and type(y)=='number'and x==x and y==y then return{X=x,Y=y}end
 end

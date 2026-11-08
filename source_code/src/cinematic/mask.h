@@ -144,7 +144,7 @@ inline bool draw(const std::array<Aperture,2>& holes,const std::array<std::array
     // OpenXR D3D12 guarantees RENDER_TARGET after wait and requires it at release.
     constexpr float black[4]={0,0,0,1},transparent[4]={0,0,0,0};
     for(unsigned eye=0;eye<2;++eye){const D3D12_CPU_DESCRIPTOR_HANDLE target{rtvs->GetCPUDescriptorHandleForHeapStart().ptr+size_t(index*2+eye)*rtv_stride};
-        slot.commands->ClearRenderTargetView(target,black,0,nullptr);
+        if(!vertices)slot.commands->ClearRenderTargetView(target,black,0,nullptr);
         if(vertices){const D3D12_VIEWPORT viewport{0,0,float(pixels),float(pixels),0,1};const D3D12_RECT scissor{0,0,pixels,pixels};slot.commands->SetPipelineState(pipeline.Get());slot.commands->SetGraphicsRootSignature(root.Get());slot.commands->SetGraphicsRootConstantBufferView(0,slot.vertices->GetGPUVirtualAddress()+eye*256);slot.commands->RSSetViewports(1,&viewport);slot.commands->RSSetScissorRects(1,&scissor);slot.commands->OMSetRenderTargets(1,&target,FALSE,nullptr);slot.commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);slot.commands->DrawInstanced(3,1,0,0);}
         else{const auto& h=holes[eye];const D3D12_RECT rect{h.left,h.top,h.right,h.bottom};slot.commands->ClearRenderTargetView(target,transparent,1,&rect);}}
     } // Resolve timestamps before Close.

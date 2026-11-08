@@ -82,8 +82,8 @@ inline void wrapper(Object canvas,const Vec* center,const Vec* normal,float radi
 inline bool initialize(const UEVR_PluginInitializeParam* p){
  host=p;if(!bomb_projection::installed||!p||!p->functions||!p->callbacks||!p->callbacks->on_custom_event)return false;
  auto module=GetModuleHandleW(nullptr);std::array<unsigned char,32> bytes{};
- if(!module||!bomb_projection::read(reinterpret_cast<unsigned char*>(module)+circleRva,bytes)||bytes!=prologue){return false;}
- const int id=p->functions->register_inline_hook(reinterpret_cast<unsigned char*>(module)+circleRva,reinterpret_cast<void*>(&wrapper),reinterpret_cast<void**>(&original));
+ if(!module||!ac8_game_compatibility::copy_verified_source(reinterpret_cast<unsigned char*>(module)+ac8_game_compatibility::rva<circleRva>(),bytes,prologue)||bytes!=prologue){return false;}
+ const int id=p->functions->register_inline_hook(reinterpret_cast<unsigned char*>(module)+ac8_game_compatibility::rva<circleRva>(),reinterpret_cast<void*>(&wrapper),reinterpret_cast<void**>(&original));
  installed=id>=0&&original;if(!installed&&id>=0)p->functions->unregister_inline_hook(id);
  return installed;
 }

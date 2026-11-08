@@ -12,7 +12,10 @@ static bool attempted=false,installed=false;
 
 
 static bool textureMatches(UEVR_UObjectHandle texture){
-    if(!texture)return false;auto name=objectName(texture);
+    if(!texture)return false;
+    const auto leaf=fname(host->sdk->uobject->get_fname(texture));
+    if(leaf.compare(0,12,L"T_HUD_Seeker")!=0)return false;
+    auto name=objectName(texture);
     static constexpr const wchar_t* names[]={L"/Game/UI/Texture/HUD/T_HUD_Seeker01_000.T_HUD_Seeker01_000",L"/Game/UI/Texture/HUD/T_HUD_Seeker01_001.T_HUD_Seeker01_001",L"/Game/UI/Texture/HUD/T_HUD_Seeker01_002.T_HUD_Seeker01_002",L"/Game/UI/Texture/HUD/T_HUD_Seeker01_003.T_HUD_Seeker01_003",L"/Game/UI/Texture/HUD/T_HUD_Seeker02_000.T_HUD_Seeker02_000",L"/Game/UI/Texture/HUD/T_HUD_Seeker02_001.T_HUD_Seeker02_001",L"/Game/UI/Texture/HUD/T_HUD_Seeker02_002.T_HUD_Seeker02_002",L"/Game/UI/Texture/HUD/T_HUD_Seeker02_003.T_HUD_Seeker02_003"};
     for(const auto* expected:names)if(name==expected)return true;
     return false;
@@ -30,22 +33,23 @@ static bool prepare(const Size* input,float scalar,bool on,Size& result){
 }
 static void wrapper(UEVR_UObjectHandle actor,UEVR_UObjectHandle texture,const Size* input,const void* color,float scalar){
     auto fn=original;if(!fn)return;
-    Size local{};const bool match=actorMatches(actor)&&textureMatches(texture);const bool on=enabled.load();
+    const bool on=enabled.load();
+    if(!on&&validated.load()){fn(actor,texture,input,color,scalar);return;}
+    Size local{};const bool match=actorMatches(actor)&&textureMatches(texture);
     if(!match||!prepare(input,scalar,on,local)){fn(actor,texture,input,color,scalar);return;}
-    
     fn(actor,texture,on?&local:input,color,scalar);
+    if(!on&&!validated.load()){
         UEVR_UObjectHandle component=nullptr;ArrayView array{};float x=0,y=0;
         bool readback=copy(host->sdk->uobject->get_property_data(actor,L"TextureBox"),component)&&component&&copy(host->sdk->uobject->get_property_data(component,L"Elements"),array)&&array.count==1&&array.data&&copy(array.data+0x14,x)&&copy(array.data+0x18,y);
-        if(!on&&readback&&std::abs(x-local.x*scalar)<1e-6&&std::abs(y-local.y*scalar)<1e-6)validated=true;
-
+        if(readback&&std::abs(x-local.x*scalar)<1e-6&&std::abs(y-local.y*scalar)<1e-6)validated=true;
+    }
 }
 static void install(){
-    attempted=true;wchar_t path[32768]{};auto module=GetModuleHandleW(nullptr);std::string hash;
-    if(!module||!host->functions->register_inline_hook||!GetModuleFileNameW(module,path,32768)||!boundary::cached_module_file_hash(module,path,hash)||hash!="51510E2A520565DBE81FB0D569E95CD4393077ACAAA859371489B80B8128829F")return;
-    auto target=reinterpret_cast<unsigned char*>(module)+0x72a3f00;
+    attempted=true;auto module=GetModuleHandleW(nullptr);
+    if(!module||!host->functions->register_inline_hook||!ac8_game_compatibility::allowed("seeker"))return;
+    auto target=reinterpret_cast<unsigned char*>(module)+ac8_game_compatibility::rva<0x72a3f00>();
     constexpr unsigned char expected[]={0x48,0x8b,0xc4,0x55,0x53,0x57,0x41,0x56,0x41,0x57,0x48,0x8b,0xec,0x48,0x83,0xec,0x60};
-    unsigned char actual[sizeof(expected)]{};SIZE_T bytes=0;
-    if(!ReadProcessMemory(GetCurrentProcess(),target,actual,sizeof(actual),&bytes)||bytes!=sizeof(actual)||std::memcmp(actual,expected,sizeof(actual)))return;
+    if(!ac8_game_compatibility::code_proof(target,expected))return;
     installed=host->functions->register_inline_hook(target,reinterpret_cast<void*>(&wrapper),reinterpret_cast<void**>(&original))>=0&&original;
 }
 static void activate(){enabled=installed&&validated.load();}

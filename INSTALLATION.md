@@ -1,22 +1,14 @@
-# Fresh installation
+# Install AC8 VR
 
-This is the unreleased development snapshot. The existing v0.1.0 release is unchanged.
+**Requires UEVR, OpenXR and Native Stereo.** Use Windows x64, DirectX 12, a working OpenXR runtime and the game's single-player EAC bypass setup. UEVR and the EAC bypass are separate prerequisites. See [UEVR](https://uevr.io/) and the [Flat2VR Modding Discord](https://discord.gg/flat2vr).
 
-Use UEVR **Native Stereo**, Windows x64 and DirectX 12. Glow uses OpenXR. UEVR and the **Bypass EAC mod** are separate prerequisites. EAC bypass setup is documented in the [Flat2VR Modding Discord](https://discord.gg/flat2vr); neither prerequisite is included here.
+1. Close the game. Back up your entire `%APPDATA%\UnrealVRMod\AceCombat8` profile, then move the old folder out of `UnrealVRMod`.
+2. Extract `AC8-VR-Community-Preview-20261108.zip` into `%APPDATA%\UnrealVRMod`. The ZIP creates an `AceCombat8` folder with `scripts`, `data`, `plugins`, `config.txt` and `cvars_data.txt`.
+3. Connect your headset and start its PC VR runtime. Launch the game with your EAC bypass setup. Open UEVR, select `AceCombat8.exe`, choose **OpenXR**, enable plugins, and inject. Use **Native Stereo**.
+4. Enter a mission and check the HUD. Open **Script UI** for layout and aircraft saves. See the [FAQ](FAQ.md) for the controls.
 
-1. Close the game. **Back up the entire `%APPDATA%\UnrealVRMod\AceCombat8` folder** by copying it somewhere safe.
-2. Move the old profile out of that location. Use a fresh AceCombat8 folder; do not merge old or third-party Lua scripts into this set.
-3. Extract the community ZIP into `%APPDATA%\UnrealVRMod`. It should create `AceCombat8` containing `scripts`, `data`, `plugins`, `config.txt` and `cvars_data.txt`.
-4. Launch the game with your EAC bypass, connect your headset, then inject UEVR with OpenXR and Native Stereo. Keep the supplied plugins, manifest and renderer assets together.
+Use the supplied profile as a set. The [file manifest](PROFILE-FILES.txt) lists the runtime files for a manual install from source. Keep the loader, feature payload, OpenXR bridge, manifest and shader assets together in the profile. Keep `AC8_VR-Core.lua` enabled. The seven other scripts are optional.
 
-The repository root also contains the current runtime files; `PROFILE-FILES.txt` lists exactly which files belong in the profile. Source, development guides and build output do not go in UEVR's scripts directory.
+**Restart the game and inject again after changing game or UEVR render resolution.** Glow and other rendering features can fail after a live resolution change.
 
-## Controls
-
-Enable Advanced settings in UEVR and open **ScriptUI**. Rearrange HUD groups and save layouts, cockpit camera position and UI Size for the current plane. The per-plane checkbox disables all aircraft overrides without deleting saved presets. General HUD controls remain available.
-
-**Keep `AC8_VR-Core.lua`.** Any of the other seven Lua modules can be moved out of `scripts` with the game closed to disable that feature. Restart afterward; keep the plugin files and assets installed.
-
-Initial UI distance, size and curvature are applied once for a fresh profile. Save later UEVR menu changes with **Save Config**. The generated `AC8_VR-HUDPresentationSetup.json` marker prevents repeated initial setup; retain it for an existing installation, but omit it from fresh-install packages.
-
-To undo the installation, close the game and restore your complete backup. Keep your saved `AC8_VR-AircraftPresets.json` and `AC8_VR-HUDDefaults.json` backed up as you customize them.
+When upgrading, keep your old profile backup and carry over your own compatible `AC8_VR-AircraftPresets.json` and `AC8_VR-HUDDefaults.json` preferences as needed. Older HUD layouts may use a different coordinate format and need to be adjusted and saved again. To undo the install, close the game and restore your backed-up profile.

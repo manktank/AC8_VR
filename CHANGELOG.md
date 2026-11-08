@@ -1,5 +1,12 @@
 # Changelog
 
+## Community preview — 2026-11-08
+
+- Add independent Mission Information and Wingman Status scaling to the grouped HUD controls and saved layouts.
+- Reduce repeated lookups and rendering work across the Lua and native modules. Restore quieter runtime logging.
+- Ship the current cockpit defaults and document optional modules, aircraft saves and the resolution restart requirement.
+- Package the current OpenXR runtime and all 47 required renderer assets.
+
 ## Unreleased — development source update, 2026-10-27
 
 - Many, many Lua and DLL optimizations reduce repeated discovery and lookups.

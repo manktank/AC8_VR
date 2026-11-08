@@ -7,6 +7,136 @@ if not registry then
  registry = {sections={}, state='waiting', completed={}}
  rawset(_G, 'AC8VRModules', registry)
 end
+-- Shared discovery is synchronous and demand-driven within one callback phase.
+-- Never hold geometry, visibility or render eligibility here. Native prepaint
+-- routing and the existing portrait/radar source producer remain authoritative.
+-- No new polling, background graph, native initialization or readiness barrier.
+local function newSharedDiscovery(R,real)
+ local I={version=2,generation=0}
+ local noValue,empty={},{}
+ local objects,metadata,trees,childLists={},{},{},{}
+ local names={get_full_name=true,get_class=true,GetChildrenCount=true,GetChildAt=true}
+ local mutations={RemoveFromParent=true,AddChild=true,AddChildToCanvas=true,SetContent=true,ClearChildren=true,RemoveChild=true,RemoveChildAt=true,SetRootWidget=true,AddToViewport=true,AddToPlayerScreen=true}
+ local function invokeMethod(o,k,...)return o[k](o,...)end
+ local function raw(o,k,...)
+  local ok,v=pcall(invokeMethod,o,k,...)
+  if ok then return v,true end
+ end
+ function I.invalidate()
+  objects,metadata,trees,childLists={},{},{},{};I.generation=I.generation+1
+ end
+ function I.advance()
+  objects,metadata,trees,childLists={},{},{},{}
+ end
+ function I.handles(k,argument)return k=='get_objects_matching'or names[k]or(k=='get_property'and(argument=='WidgetTree'or argument=='RootWidget'))end
+ function I.mutates(k)return mutations[k]==true end
+ local function tryCall(o,k,...)
+  if not o or(o~=real.api and not R.isLiveObject(o))then return end
+  local argument=select(1,...)
+  if mutations[k]then I.invalidate();return raw(o,k,...)end
+  local roster=k=='get_objects_matching'
+  local cached=names[k]or(k=='get_property'and(argument=='WidgetTree'or argument=='RootWidget'))
+  if not roster and not cached then return raw(o,k,...)end
+  local cache=roster and objects or metadata
+  local row=cache[o];if not row then row={};cache[o]=row end
+  local key=k
+  if k=='GetChildAt'then
+   if not row.childAt then row.childAt={}end;row=row.childAt;key=argument
+  elseif k=='get_property'then key=argument
+  elseif roster then key=argument==nil and noValue or argument end
+  local entry=row[key]
+  if entry~=nil then if entry~=noValue then return entry,true end;return nil,true end
+  local value,ok=raw(o,k,...)
+  if ok then row[key]=value==nil and noValue or value end
+  return value,ok
+ end
+ function I.call(o,k,...)local value=tryCall(o,k,...);return value end
+ function I.objects(cls,derived)return I.call(cls,'get_objects_matching',derived)end
+ local function nestedRoot(widget)
+  local tree=I.call(widget,'get_property','WidgetTree')
+  if not tree then return nil,true end
+  local child,ok=tryCall(tree,'get_property','RootWidget')
+  if not ok then return nil,false end
+  if child==nil then
+   -- A live, reflected WidgetTree can have no root. A successful null
+   -- read describes an empty nested subtree, not a missing child handle.
+   local name=I.call(tree,'get_full_name')
+   return nil,type(name)=='string'and name:match('^WidgetTree ')~=nil
+  end
+  if not R.isLiveObject(child)then return nil,false end
+  return child,true
+ end
+ function I.children(o,knownRoot)
+  if not R.isLiveObject(o)then return end
+  local prior=childLists[o]
+  if prior then
+   local live=true;for _,w in ipairs(prior)do if not R.isLiveObject(w)then live=false;break end end
+   if live then return prior end
+   I.invalidate()
+  end
+  local n=I.call(o,'GetChildrenCount')
+  if n==nil then n=0 end
+  if type(n)~='number'or n<0 or n>4096 or n%1~=0 then return end
+  local out=n==0 and empty or{}
+  for index=0,n-1 do
+   local w=I.call(o,'GetChildAt',index)
+   if not R.isLiveObject(w)then return end
+   out[#out+1]=w
+  end
+  if #out==0 then
+   local first,valid=knownRoot,true
+   if not first then first,valid=nestedRoot(o)end
+   if not valid then return end
+   if first then out={first}end
+  end
+  childLists[o]=out;return out
+ end
+ function I.tree(root)
+  local name=I.call(root,'get_full_name');if not name then return end
+  local cached=trees[root]
+  if cached and cached.name==name then
+   local live=true
+   for _,w in ipairs(cached.rows)do if not R.isLiveObject(w)then live=false;break end end
+   if live then return cached.rows,cached.names end
+   I.invalidate()
+  end
+  local tree=I.call(root,'get_property','WidgetTree')
+  local first=I.call(tree,'get_property','RootWidget')
+  if not R.isLiveObject(first)then return end
+  local generation=I.generation
+  local rows,queue,seen,identities={},{root},{},{};local index=1
+  local queued={[root]=true}
+  local function enqueue(widget)
+   if widget and not queued[widget]then queued[widget]=true;queue[#queue+1]=widget end
+  end
+  while index<=#queue do
+   if index>8192 then return end
+   local w=queue[index];index=index+1
+   local n=I.call(w,'get_full_name');if not n then return end
+   if not seen[n]then
+    seen[n]=true;rows[#rows+1]=w;identities[w]=n
+    local children=I.children(w,w==root and first or nil)
+    if not children then return end
+    for _,child in ipairs(children)do enqueue(child)end
+    -- A leaf's child-list read already checked its nested tree. Preserve the
+    -- original second edge type for nodes that also expose panel children.
+    local row=metadata[w];local countForWidget=row and row.GetChildrenCount
+    if type(countForWidget)=='number'and countForWidget>0 then
+     local child,valid=first,true
+     if w~=root then child,valid=nestedRoot(w)end
+     if not valid then return end
+     enqueue(child)
+    end
+   end
+  end
+  if generation~=I.generation then return end
+  trees[root]={name=name,rows=rows,names=identities}
+  return rows,identities
+ end
+ return I
+end
+-- End shared discovery service.
+
 -- Shared pause/tutorial support, owned by Core.
 local function ensureTutorialState(R)
  if R.tutorialState then return R.tutorialState end
@@ -14,7 +144,7 @@ local function ensureTutorialState(R)
  R.tutorialState=T
  local function call(o,k,...)
   if not o or(o~=uevr.api and not R.isLiveObject(o))then return end
-  local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end
+  local ok,v=pcall(function(...)return R.inventory.call(o,k,...)end,...);if ok then return v end
  end
  local function full(o)return call(o,'get_full_name')end
  local function prop(o,k)return call(o,'get_property',k)end
@@ -31,7 +161,7 @@ local function dialogRoots()
   local cls=tutorialClasses[path];local identity=full(cls)
   if identity~=path then cls=call(uevr.api,'find_uobject',path);tutorialClasses[path]=cls;identity=full(cls)end
   if identity==path then
-   local objects=call(cls,'get_objects_matching',false)
+   local objects=R.inventory.objects(cls,false)
    if type(objects)=='table'then
     
     return objects
@@ -158,6 +288,9 @@ local function newHUDDefaultsStore(files)
    if not param(c)or type(c.extraWidth)~='number'or c.extraWidth~=c.extraWidth or c.extraWidth<0 or c.extraWidth>4000 or
     type(c.extraHeight)~='number'or c.extraHeight~=c.extraHeight or c.extraHeight<0 or c.extraHeight>4000 or type(c.inheritClip)~='boolean'then return end
   end
+  if v.coordinateRevision~=nil and v.coordinateRevision~=2 then return end
+  local w=v.weaponCalibration
+  if w~=nil and(type(w)~='table'or type(w.saamScale)~='number'or w.saamScale~=w.saamScale or w.saamScale<.25 or w.saamScale>2 or type(w.bombFov)~='number'or w.bombFov~=w.bombFov or math.abs(w.bombFov)>40 or type(w.bombY)~='number'or w.bombY~=w.bombY or math.abs(w.bombY)>4000)then return end
   local out=copy(v);out.components=out.components or{};out.simpleGroups=out.simpleGroups or{};out.simpleGroups.navigation=nil
   for k,p in pairs(out.simpleGroups)do
    if type(k)~='string'or type(p)~='table'or type(p.x)~='number'or p.x~=p.x or math.abs(p.x)>4000 or type(p.y)~='number'or p.y~=p.y or math.abs(p.y)>4000 then return end
@@ -197,7 +330,7 @@ local function newHUDDefaultsStore(files)
  function D:saveGlobal(value)return self:saveShared(value,true)end
  function D:view()
   local P={message='AC8_VR-AircraftPresets.lua is absent; general HUD controls remain available.'}
-  function P:init()D:init();self.db={version=1,perPlaneEnabled=false,useDefaultForAllPlanes=true,default=copy(D.db.default),allPlanes=copy(D.db.shared),planes={}};return true end
+  function P:init()if self.db and self.source==D.db then return true end;D:init();self.source=D.db;self.db={version=1,perPlaneEnabled=false,useDefaultForAllPlanes=true,default=copy(D.db.default),allPlanes=copy(D.db.shared),planes={}};return true end
   function P:selected()return copy(D.db.shared),'all planes'end
   function P:saveAll(v)local ok,msg=D:saveShared(v);if ok then self:init();self.force=true end;return ok,msg end
   function P:saveGlobalHUD(v)local ok,msg=D:saveGlobal(v);if ok then self:init();self.force=true end;return ok,msg end
@@ -221,7 +354,8 @@ _G.AC8Runtime=R
 R.ensureTutorialState=function()return ensureTutorialState(R)end
 R.newHUDDefaultsStore=newHUDDefaultsStore
 local order={'presentation','admission','layout','camera','utility','loading','intro','development'}
-local function invoke(o,k,...)local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end end
+local function invokeMethod(o,k,...)return o[k](o,...)end
+local function invoke(o,k,...)local ok,v=pcall(invokeMethod,o,k,...);if ok then return v end end
 -- UObjectHook tracks destruction; membership checks do not walk reflected fields.
 local objectHook=rawget(_G,'UEVR_UObjectHook')or(real.types and real.types.UObjectHook)
 local exists=objectHook and objectHook.exists
@@ -234,58 +368,16 @@ end
 -- UObject calls require lifetime membership. SDK tables and returned geometry
 -- structs use their own helpers; they must not be sent through this guard.
 function R.objectCall(o,k,...)
+ if R.inventory then
+  if o==real.api then return end -- SDK tables are not UObjects.
+  return R.inventory.call(o,k,...)
+ end
  if not R.isLiveObject(o)then return nil end
  return invoke(o,k,...)
 end
--- Shared discovery within one engine tick. Walk only the requested widget's
--- painted hierarchy, including nested UserWidget trees. Callers retain their
--- existing visibility, clipping and owner checks and their discovery cadence.
--- An unavailable root or incomplete walk returns nil for the legacy fallback.
-local widgetWalk={}
-function R.ownedWidgets(root,fresh)
- if widgetWalk.tick~=R.tick or widgetWalk.epoch~=R.context.epoch then
-  widgetWalk={tick=R.tick,epoch=R.context.epoch,roots={}}
- end
- local name=R.objectCall(root,'get_full_name')
- if not name then return nil end
- local cached=widgetWalk.roots[name]
- if not fresh and cached and cached.root==root then
-  local alive=true
-  for _,w in ipairs(cached.rows)do if not R.isLiveObject(w)then alive=false;break end end
-  if alive then return cached.rows,cached.names end
- end
- local tree=R.objectCall(root,'get_property','WidgetTree')
- local first=R.objectCall(tree,'get_property','RootWidget')
- if not R.isLiveObject(first)then return nil end
- local rows,queue,seen,names={},{root},{},{}
- local index=1
- while index<=#queue do
-  if index>8192 then return nil end
-  local w=queue[index];index=index+1
-  local n=R.objectCall(w,'get_full_name')
-  if not n then return nil end
-  if not seen[n]then
-   seen[n]=true;rows[#rows+1]=w;names[w]=n
-   local count=R.objectCall(w,'GetChildrenCount')
-   if count~=nil then
-    if type(count)~='number'or count<0 or count>4096 or count%1~=0 then return nil end
-    for i=0,count-1 do
-     local child=R.objectCall(w,'GetChildAt',i)
-     if not R.isLiveObject(child)then return nil end
-     queue[#queue+1]=child
-    end
-   end
-   local wt=R.objectCall(w,'get_property','WidgetTree')
-   if wt then
-    local child=R.objectCall(wt,'get_property','RootWidget')
-    if not R.isLiveObject(child)then return nil end
-    queue[#queue+1]=child
-   end
-  end
- end
- widgetWalk.roots[name]={root=root,rows=rows,names=names}
- return rows,names
-end
+-- Shared inventory coalesces within one callback phase. Structural mutations
+-- invalidate it immediately, so discovery stays synchronous at first paint.
+function R.ownedWidgets(root)return R.inventory.tree(root)end
 -- Facts are refreshed lazily once per callback phase, only if a selected feature asks.
 local current={epoch=0};local contextStamp=-1;local factStamp=-1;local facts={};local phase=0
 local function refresh()
@@ -305,25 +397,32 @@ local function fact(key,reader)
  if not facts[key]then facts[key]={reader()}end
  return table.unpack(facts[key])
 end
+local function readViewTargetName()
+ return R.objectCall(R.objectCall(R.context.pc,'GetViewTarget'),'get_full_name')or''
+end
 function R.viewTargetName()
- return fact('viewTargetName',function()return R.objectCall(R.objectCall(R.context.pc,'GetViewTarget'),'get_full_name')or''end)
+ return fact('viewTargetName',readViewTargetName)
 end
 local statics
 function R.gameStatics()
  if not R.isLiveObject(statics)then statics=invoke(real.api,'find_uobject','GameplayStatics /Script/Engine.Default__GameplayStatics')end
  return statics
 end
-function R.paused()return fact('paused',function()return R.objectCall(R.gameStatics(),'IsGamePaused',R.context.pc)end)end
+local function readPaused()
+ return R.objectCall(R.gameStatics(),'IsGamePaused',R.context.pc)
+end
+function R.paused()return fact('paused',readPaused)end
+local function readMatchState()
+ local state=R.objectCall(R.gameStatics(),'GetGameState',R.context.pc)
+ local name=R.objectCall(state,'get_full_name')or''
+ local level=(R.objectCall(R.context.pc,'get_full_name')or''):match('%s(.+%.PersistentLevel)%.')
+ if not level or not name:match('^LiveGameState ')or not name:find(' '..level..'.',1,true)then return nil end
+ local v=R.objectCall(state,'get_property','MatchState')
+ if type(v)=='string'then return v end
+ if v~=nil then local ok,text=pcall(function()return v:to_string()end);if ok and type(text)=='string'then return text end end
+end
 function R.matchState()
- return fact('matchState',function()
-  local state=R.objectCall(R.gameStatics(),'GetGameState',R.context.pc)
-  local name=R.objectCall(state,'get_full_name')or''
-  local level=(R.objectCall(R.context.pc,'get_full_name')or''):match('%s(.+%.PersistentLevel)%.')
-  if not level or not name:match('^LiveGameState ')or not name:find(' '..level..'.',1,true)then return nil end
-  local v=R.objectCall(state,'get_property','MatchState')
-  if type(v)=='string'then return v end
-  if v~=nil then local ok,text=pcall(function()return v:to_string()end);if ok and type(text)=='string'then return text end end
- end)
+ return fact('matchState',readMatchState)
 end
 R.settingOwners={}
 function R.setOwnership(owner,channel,active)
@@ -361,6 +460,7 @@ end
 function R.contextTick(advance)
  if advance~=false then R.tick=R.tick+1 end
  phase=phase+1
+ if R.inventory then R.inventory.advance()end
 end
 function R.connect(key)
  if R.connected[key]then return end;R.connected[key]=true
@@ -371,7 +471,7 @@ function R.connect(key)
   elseif key=='on_post_engine_tick'or key=='on_pre_viewport_client_draw'then R.contextTick(false)end
   for _,domain in ipairs(order)do
    local rows=(domain~='layout'or R.layoutEnabled)and R.domains[domain]and R.domains[domain][key]
-   for _,row in ipairs(rows or{})do local ok,err=pcall(row.fn,...);if not ok then R.errors[row.name]=tostring(err)end end
+   if rows then for _,row in ipairs(rows)do local ok,err=pcall(row.fn,...);if not ok then R.errors[row.name]=tostring(err)end end end
   end
  end)
 end
@@ -391,6 +491,8 @@ R.json={load_file=R.read,dump_file=function(name,value,indent)
  if journals[name]then R.cache[name]=nil;return realJSON.dump_file(name,value,indent)end
 end}
 function R.log()end
+R.inventory=newSharedDiscovery(R,real)
+real.sdk.callbacks.on_script_reset(function()R.inventory.invalidate()end)
 R.connect('on_pre_engine_tick')
 
 
@@ -408,9 +510,10 @@ local existing=rawget(_G,'AC8_TutorialFill')
 if existing then assert(existing.stop(),'Previous tutorial originals could not be restored')end
 local S={version=11,stopped=false,ticks=0,records={}}
 rawset(_G,'AC8_TutorialFill',S)
+local function invokeMethod(o,k,...)return o[k](o,...)end
 local function call(o,k,...)
  if not o or(o~=uevr.api and not R.isLiveObject(o))then return nil end
- local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end
+ local ok,v=pcall(invokeMethod,o,k,...);if ok then return v end
 end
 local function full(o)return call(o,'get_full_name')end
 local function prop(o,k)return call(o,'get_property',k)end
@@ -525,7 +628,8 @@ local R=AC8Runtime
 local host=R.host('utility','pause menu attachment')
 local S={version=58,epoch=-1};R.pauseMenuAttachment=S
 local lastPauseGuard=nil
-local function call(o,k,...)if not o then return end;local ok,v=pcall(function(...)return o[k](o,...)end,...);if ok then return v end end
+local function invokeMethod(o,k,...)return o[k](o,...)end
+local function call(o,k,...)if not o then return end;local ok,v=pcall(invokeMethod,o,k,...);if ok then return v end end
 local function full(o)return call(o,'get_full_name')or''end
 local statics=call(uevr.api,'find_uobject','GameplayStatics /Script/Engine.Default__GameplayStatics')
 host.sdk.callbacks.on_post_engine_tick(function()
@@ -544,7 +648,7 @@ host.sdk.callbacks.on_post_engine_tick(function()
  -- If the game has parented the container already, do not reparent it.
  local attached=call(root,'IsInViewport')
  if attached==false and not call(root,'GetParent')then
-  call(root,'AddToViewport');attached=call(root,'IsInViewport')
+  R.inventory.call(root,'AddToViewport');attached=call(root,'IsInViewport')
  end
  
 end)
