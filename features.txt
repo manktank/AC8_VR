@@ -1,16 +1,71 @@
-AC8 VR features — November 2026 community preview
+AC8 VR features
+November 2026 community preview
 
-- Move and resize the cockpit HUD by group. Adjust the ladder, radar,
-  aircraft status, mission information and wingman status. Trim the
-  flight path marker independently while it follows the ladder.
-- Save HUD layouts and UI size per aircraft. Save cockpit camera position
-  and perceived cockpit size separately or with the HUD. Set global defaults.
-- See the game's HUD glow in VR, with glow applied selectively during flight.
-- Read world target labels more easily and use smaller off-screen indicators.
-- Get cleaner loading transitions, improved cinematic and hangar framing,
-  readable tutorial cards, and single-step pause and retry navigation.
-- Enable only the enhancements you want. Core stays enabled and the seven
-  optional Lua modules can be disabled individually.
+Cockpit HUD layout
+- Move and resize the radar, center ladder, aircraft status, mission
+  information and wingman status live from UEVR's Script UI.
+- Move score, current target and time remaining together as Mission
+  Information, then fine-tune each row separately.
+- Move wingman orders, the comms portrait and radio messages independently.
+- Keep wingman status above the radar as it changes between normal and
+  expanded modes. Give the status group its own position and scale.
+- Move and scale the pitch ladder, speed, altitude and flight path marker
+  together. Trim the flight path marker separately while retaining its
+  in-flight movement.
+- Start with a curved VR HUD and adjust its distance, overall size and
+  curvature in UEVR.
 
-Requires UEVR, OpenXR and Native Stereo. Restart after changing the game
-resolution or UEVR render resolution.
+Aircraft presets and cockpit camera
+- Save a HUD layout, UEVR UI Size, and cockpit camera offsets for each
+  aircraft. Save the HUD and camera separately or with one button.
+- Adjust your seated position forward, back, sideways and vertically.
+  Adjust perceived cockpit size while in cockpit view.
+- Set global HUD and camera defaults for aircraft without their own presets,
+  or use a shared HUD layout across all aircraft.
+- Reload the selected saved layout or turn per-plane settings off temporarily.
+  Your saved presets stay available when you turn them back on.
+- Reduce game-driven camera shakes and camera animations during flight
+  with the optional Plane Camera module.
+
+Glow and readability
+- Recreate the game's HUD glow in VR, composited into each eye's view.
+- Apply glow selectively so supported radio text, tutorial cards and menu
+  panels stay readable. Keep radar and comms portrait treatment separate
+  from the surrounding HUD.
+- Respect the dark backing of pause and retry menus while retaining
+  the flight HUD behind them.
+- Keep the game's native tutorial card fill, remove the extra background
+  rectangle and suppress tutorial blur.
+
+Targets and weapon displays
+- Resize world-target boxes and labels for VR, with adjusted text spacing
+  and placement. Retain the game's target introduction animation.
+- Resize assignment and escort markers. Keep the aerial refueling guide's
+  artwork and labels aligned as a group.
+- Reduce and reposition off-screen target indicators for more room near
+  the edges. Keep the forward locator and off-screen indicators aligned
+  to their own centers.
+- Resize supported target-lock seeker artwork. Adjust the SAAM circle size
+  from the HUD controls.
+- Align the bomb trajectory display with the flight path marker. Fine-tune
+  the bomb projection and landing marker height in Script UI while the
+  game continues to calculate the actual impact point.
+
+Cinematics, hangar and transitions
+- Switch to the game's authored camera framing for cinematics and the
+  hangar, including Aircraft Set. Return to your flight settings afterward.
+- Use mission loading coverage and in-game fades to cover the handoff
+  between menus and flight. Center the loading indicator for VR.
+- Move through pause and retry choices one step per keyboard or controller
+  press. Keep flight warnings and messages responsive during HUD updates.
+
+Modular profile and compatibility
+- Keep AC8_VR-Core.lua enabled. The seven other scripts let you choose
+  whether to use aircraft presets, cinematics and hangar presentation,
+  HUD glow, HUD layout, loading, camera stabilization and target changes.
+- The preview reduces repeated HUD lookups and rendering work and uses
+  quieter logging.
+- Requires UEVR with OpenXR and Native Stereo. Restart the game and
+  inject again after changing the game resolution or UEVR render resolution.
+- For module toggles, cockpit save steps and troubleshooting, see README.md
+  and FAQ.md.
