@@ -1,8 +1,8 @@
-# AC8-VR_MankTank_v0.3.2
+# AC8-VR_MankTank_v0.3.3
 
 **UEVR and OpenXR are required. Select OpenXR in the UEVR injector and use Native Stereo.** If you use SteamVR, set it as your active OpenXR runtime, then still choose OpenXR in UEVR.
 
-AC8 VR is a community profile for playing Ace Combat 8 in VR. This build includes the optimized runtime and the latest cockpit HUD controls.
+AC8 VR is a community profile for playing Ace Combat 8 in VR. Version 0.3.3 fixes a reported freeze when entering a mission with HUD glow enabled. This is a complete clean-install release. See the [release notes](RELEASE-NOTES.md).
 
 [Install the profile](INSTALLATION.md) · [FAQ](FAQ.md) · [Features](features.txt) · [Compatibility](docs/COMPATIBILITY.md)
 

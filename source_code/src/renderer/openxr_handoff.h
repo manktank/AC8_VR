@@ -7,16 +7,22 @@
 // explicit eligibility and composition; this file never records GPU commands.
 // A selected release returns provisional XR_SUCCESS. Its later runtime error
 // cannot be replayed to that original call; all other calls retain real results.
+// Lock order: transaction_ -> renderer lock. Runtime calls made under
+// transaction_ may wait for a D3D11On12/runtime worker that enters our copy
+// hooks, so copy observation reads only the published observation snapshot.
+// observation_lock_ is a leaf: never held across COM, runtime or callback calls.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
 #include <d3d12.h>
 #include <wrl/client.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -84,6 +90,10 @@ class Bridge {
     struct Chain {Swapchain handle=0;Session session=nullptr;uint64_t generation=0,held_frame=0;
         uint32_t count=0;std::array<Microsoft::WRL::ComPtr<ID3D12Resource>,16> images{};
         std::optional<acquired_images::Token> waited,held;};
+    // Eligible waited/held tokens as of the last outermost mutating exit,
+    // minus chains retired since. Raw pointers are identities only.
+    struct Observation {bool open=false;uint64_t frame=0;ID3D12Device* device=nullptr;
+        size_t count=0;std::array<acquired_images::Token,32> candidates{};};
     inline static std::atomic<Bridge*> active_{nullptr};
     std::recursive_mutex transaction_;
     acquired_images::Bookkeeper images_{release_info_type};
@@ -93,6 +103,11 @@ class Bridge {
     bool frame_open_=false,disabled_=false,committing_=false,fatal_frame_=false;
     bool session_suspended_=false;
     std::atomic<bool> ready_{false};
+    uint32_t transaction_depth_=0; // Guarded by transaction_.
+    SRWLOCK observation_lock_=SRWLOCK_INIT;
+    Observation observation_{}; // Guarded by observation_lock_.
+    static_assert(std::tuple_size<decltype(chains_)>::value*2==
+                  std::tuple_size<decltype(Observation::candidates)>::value,"one waited and one held per chain");
     HookApi hooks_{};unsigned char* backend_=nullptr;
     std::array<void*,12> dispatch_{};
     CreateSessionFn create_session_=nullptr;CreateSwapchainFn create_swapchain_=nullptr;
@@ -126,20 +141,99 @@ class Bridge {
     Chain* vacant(){for(auto& c:chains_)if(!c.handle)return &c;return nullptr;}
     acquired_images::ReleaseCall actual_release(){return {call_release,this};}
     static Result call_release(Swapchain handle,const acquired_images::ReleaseInfo* info,void* context){
-        return static_cast<Bridge*>(context)->release_(handle,info);
+        auto* target=static_cast<Bridge*>(context);
+        try{
+            const Result result=target->release_(handle,info);
+            if(result!=acquired_images::success)target->retire_observation();
+            return result;
+        }catch(...){
+            target->retire_observation();
+            throw;
+        }
     }
     void clear_settled(Chain& c){if(!images_.state(c.handle).pending)c.held.reset();}
+    // Every actual release first retires the affected observation candidates.
+    // A failed release can disable mutation globally, so retire everything.
     bool flush_chain(Chain& c){
-        const bool okay=images_.flush_chain(c.handle,actual_release());clear_settled(c);return okay;
+        retire_observation(c.handle);
+        const bool okay=images_.flush_chain(c.handle,actual_release());clear_settled(c);
+        if(!okay)retire_observation();
+        return okay;
     }
     bool flush_all(){
+        retire_observation();
         const bool okay=images_.flush_all(actual_release());
         for(auto& c:chains_)if(c.handle)clear_settled(c);
         return okay;
     }
     bool effect(Session session){return ready_.load(std::memory_order_acquire)&&!disabled_&&
         !session_suspended_&&binding_&&binding_.session==session&&images_.mutation_enabled();}
-    bool disable_effect(){disabled_=true;frame_open_=false;return images_.disable(actual_release());}
+    bool disable_effect(){retire_observation();disabled_=true;frame_open_=false;return images_.disable(actual_release());}
+    // Same predicates as the former locked observed_image query, evaluated
+    // under transaction_ with no observation lock held.
+    Observation current_observation(){
+        Observation o{};
+        if(!frame_open_||!frame_||observed_sessions_!=1||!effect(binding_.session))return o;
+        o.open=true;o.frame=frame_;o.device=binding_.device.Get();
+        for(const auto& c:chains_)if(c.handle&&c.session==binding_.session){
+            for(const auto& candidate:{c.waited,c.held})if(candidate&&candidate->resource&&
+               candidate->generation==c.generation&&candidate->index<c.count&&
+               c.images[candidate->index].Get()==candidate->resource)o.candidates[o.count++]=*candidate;
+        }
+        return o;
+    }
+    void store_observation(const Observation& value) noexcept{
+        AcquireSRWLockExclusive(&observation_lock_);
+        observation_.open=value.open;observation_.frame=value.frame;observation_.device=value.device;
+        observation_.count=value.count;
+        std::copy_n(value.candidates.begin(),value.count,observation_.candidates.begin());
+        ReleaseSRWLockExclusive(&observation_lock_);
+    }
+    void retire_observation() noexcept{
+        AcquireSRWLockExclusive(&observation_lock_);
+        observation_.open=false;observation_.count=0;
+        ReleaseSRWLockExclusive(&observation_lock_);
+    }
+    void retire_observation(Swapchain handle) noexcept{
+        AcquireSRWLockExclusive(&observation_lock_);
+        size_t kept=0;
+        for(size_t x=0;x<observation_.count;++x)
+            if(observation_.candidates[x].chain!=handle)observation_.candidates[kept++]=observation_.candidates[x];
+        observation_.count=kept;
+        ReleaseSRWLockExclusive(&observation_lock_);
+    }
+    // Mutating entry points hold transaction_ and republish once, at the
+    // outermost exit, before unlocking. Nested same-thread calls only retire.
+    class Transaction {
+        Bridge& bridge_;
+        std::lock_guard<std::recursive_mutex> guard_;
+        int exceptions_at_entry_;
+    public:
+        explicit Transaction(Bridge& target)
+            :bridge_(target),guard_(target.transaction_),
+             exceptions_at_entry_(std::uncaught_exceptions()){
+            ++bridge_.transaction_depth_;
+        }
+        ~Transaction() noexcept{
+            const bool outermost=--bridge_.transaction_depth_==0;
+            if(std::uncaught_exceptions()>exceptions_at_entry_){
+                bridge_.retire_observation();
+                bridge_.disabled_=true;
+                bridge_.frame_open_=false;
+                return;
+            }
+            if(!outermost)return;
+            try{
+                bridge_.store_observation(bridge_.current_observation());
+            }catch(...){
+                bridge_.retire_observation();
+                bridge_.disabled_=true;
+                bridge_.frame_open_=false;
+            }
+        }
+        Transaction(const Transaction&)=delete;
+        Transaction& operator=(const Transaction&)=delete;
+    };
     static bool read_binding(const SessionCreateInfo* info,Session* output,GraphicsBinding* binding,Session* session){
         __try{
             if(!output||!*output||!info||info->type!=session_create_type||!info->next)return false;
@@ -190,7 +284,7 @@ public:
     // D3D12Component.cpp). Recover that existing public session; still require
     // fresh observed create/enumerate/acquire/wait/copy/release transactions.
     bool adopt_existing_session(Session session,ID3D12Device* device,ID3D12CommandQueue* queue){
-        std::lock_guard<std::recursive_mutex> guard(transaction_);
+        Transaction lock(*this);
         if(!ready_.load()||disabled_||!session||!device||!queue||observed_sessions_||binding_||frame_open_)return false;
         for(const auto& c:chains_)if(c.handle)return false;
         Microsoft::WRL::ComPtr<ID3D12Device> actual;
@@ -198,7 +292,7 @@ public:
         binding_.session=session;binding_.device=device;binding_.queue=queue;observed_sessions_=1;return true;
     }
     bool attach(const UEVR_PluginInitializeParam* api,Callbacks callbacks,HookApi injection={}){
-        std::lock_guard<std::recursive_mutex> guard(transaction_);
+        Transaction lock(*this);
         if(!api||!api->functions||!api->functions->register_inline_hook)return false;
         if(ready_)return true;
         if(disabled_)return false; // Never retry a partially installed hook set.
@@ -272,23 +366,26 @@ public:
     }
     bool enabled(){std::lock_guard<std::recursive_mutex> guard(transaction_);
         return effect(binding_.session);}
-    void disable(){std::lock_guard<std::recursive_mutex> guard(transaction_);disable_effect();}
+    void disable(){Transaction lock(*this);disable_effect();}
+    // Copy hooks can run on a runtime worker that a bridge wrapper is waiting
+    // for while holding transaction_. Read only the leaf snapshot. `device` is
+    // an identity for comparison and is never dereferenced or retained.
     bool observed_image(ID3D12Resource* resource,acquired_images::Token& token,
-                        uint64_t& frame,Binding& binding){
-        std::lock_guard<std::recursive_mutex> guard(transaction_);
-        if(!resource||!frame_open_||!frame_||observed_sessions_!=1||
-           !effect(binding_.session))return false;
-        std::optional<acquired_images::Token> match;
-        for(const auto& c:chains_)if(c.handle&&c.session==binding_.session){
-            for(const auto& candidate:{c.waited,c.held})if(candidate&&
-               candidate->generation==c.generation&&candidate->index<c.count&&
-               candidate->resource==resource&&c.images[candidate->index].Get()==resource){
-                if(match&&!(*match==*candidate))return false;
-                match=candidate;
+                        uint64_t& frame,ID3D12Device*& device){
+        if(!resource)return false;
+        bool found=false;
+        AcquireSRWLockShared(&observation_lock_);
+        if(observation_.open){
+            const acquired_images::Token* match=nullptr;bool ambiguous=false;
+            for(size_t x=0;x<observation_.count&&!ambiguous;++x){
+                const auto& candidate=observation_.candidates[x];
+                if(candidate.resource!=resource)continue;
+                if(match&&!(*match==candidate))ambiguous=true;else match=&candidate;
             }
+            if(match&&!ambiguous){token=*match;frame=observation_.frame;device=observation_.device;found=true;}
         }
-        if(!match)return false;
-        token=*match;frame=frame_;binding=binding_;return true;
+        ReleaseSRWLockShared(&observation_lock_);
+        return found;
     }
     bool pending_exact(const acquired_images::Token& token){
         std::lock_guard<std::recursive_mutex> guard(transaction_);
@@ -302,7 +399,7 @@ public:
     }
     static Result __stdcall on_create_session(Instance i,const SessionCreateInfo* info,Session* output){
         Bridge* b=active_;if(!b||!b->create_session_)return runtime_failure;
-        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        Transaction lock(*b);
         const Result result=b->create_session_(i,info,output);
         if(result!=0||!b->ready_||b->disabled_)return result;
         if(++b->observed_sessions_!=1){b->disable_effect();return result;} // Multiple sessions unsupported.
@@ -318,7 +415,7 @@ public:
     }
     static Result __stdcall on_create_swapchain(Session s,const SwapchainCreateInfo* info,Swapchain* output){
         Bridge* b=active_;if(!b||!b->create_swapchain_)return runtime_failure;
-        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        Transaction lock(*b);
         const Result result=b->create_swapchain_(s,info,output);
         if(result!=0||!b->effect(s))return result;
         Swapchain created=0;
@@ -330,7 +427,7 @@ public:
     }
     static Result __stdcall on_enumerate(Swapchain h,uint32_t capacity,uint32_t* count,Image* output){
         Bridge* b=active_;if(!b||!b->enumerate_)return runtime_failure;
-        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        Transaction lock(*b);
         const Result result=b->enumerate_(h,capacity,count,output);
         auto* c=b->chain(h);if(result!=0||!c||!b->effect(c->session)||!capacity)return result;
         ID3D12Resource* values[16]{};uint32_t size=0;
@@ -348,7 +445,7 @@ public:
     }
     static Result __stdcall on_acquire(Swapchain h,const Base* info,uint32_t* index){
         Bridge* b=active_;if(!b||!b->acquire_)return runtime_failure;
-        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        Transaction lock(*b);
         auto* c=b->chain(h);
         if(b->committing_)return runtime_failure;
         if(c&&c->count&&b->images_.state(h).pending&&!b->flush_chain(*c))return runtime_failure;
@@ -361,15 +458,17 @@ public:
     }
     static Result __stdcall on_wait(Swapchain h,const Base* info){
         Bridge* b=active_;if(!b||!b->wait_)return runtime_failure;
-        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        Transaction lock(*b);
         auto* c=b->chain(h);
         if(b->committing_)return runtime_failure;
-        if(c&&c->count&&!b->images_.before_wait(h,b->actual_release())){
-            b->disable_effect();return runtime_failure;
+        if(c&&c->count){
+            b->retire_observation(h);
+            if(!b->images_.before_wait(h,b->actual_release())){b->disable_effect();return runtime_failure;}
         }
         if(c)b->clear_settled(*c);
         const Result result=b->wait_(h,info);
         if(c&&c->count&&b->effect(c->session)){
+            if(result!=0&&result!=1)b->retire_observation();
             c->waited=b->images_.observe_wait(h,result);
             if(result==0&&!c->waited)b->disable_effect();
         }
@@ -377,7 +476,7 @@ public:
     }
     static Result __stdcall on_release(Swapchain h,const acquired_images::ReleaseInfo* info){
         Bridge* b=active_;if(!b||!b->release_)return runtime_failure;
-        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        Transaction lock(*b);
         auto* c=b->chain(h);
         if(b->committing_)return runtime_failure;
         if(!c||!c->count)return b->release_(h,info);
@@ -387,6 +486,8 @@ public:
             try{if(b->callbacks_.can_hold(*c->waited,b->frame_,b->callbacks_.context))selected=c->waited;}
             catch(...){b->disable_effect();}
         }
+        // can_hold only inspects; retire before any release or flush callout.
+        b->retire_observation(h);
         const auto outcome=b->images_.release(h,info,selected,b->actual_release());
         if(outcome.action==acquired_images::Action::deferred){
             c->held=selected;c->held_frame=b->frame_;c->waited.reset();return 0;
@@ -397,9 +498,10 @@ public:
     }
     static Result __stdcall on_destroy_swapchain(Swapchain h){
         Bridge* b=active_;if(!b||!b->destroy_swapchain_)return runtime_failure;
-        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        Transaction lock(*b);
         if(b->committing_)return runtime_failure;
         auto* c=b->chain(h);if(c&&c->count&&!b->flush_chain(*c))return runtime_failure;
+        b->retire_observation(h);
         const Result result=b->destroy_swapchain_(h);
         if(c&&(result==0||result==acquired_images::session_loss_pending)){
             if(!b->images_.retire_chain(h,b->actual_release()))b->disable_effect();
@@ -409,7 +511,7 @@ public:
     }
     static Result __stdcall on_end_session(Session s){
         Bridge* b=active_;if(!b||!b->end_session_)return runtime_failure;
-        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        Transaction lock(*b);
         if(b->committing_||!b->flush_all())return runtime_failure;
         const Result result=b->end_session_(s);
         if(s==b->binding_.session&&result==0){b->frame_open_=false;b->session_suspended_=true;}
@@ -418,14 +520,14 @@ public:
     }
     static Result __stdcall on_begin_session(Session s,const Base* info){
         Bridge* b=active_;if(!b||!b->begin_session_)return runtime_failure;
-        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        Transaction lock(*b);
         const Result result=b->begin_session_(s,info);
         if(result==0&&s==b->binding_.session&&!b->disabled_&&b->images_.mutation_enabled())b->session_suspended_=false;
         return result;
     }
     static Result __stdcall on_destroy_session(Session s){
         Bridge* b=active_;if(!b||!b->destroy_session_)return runtime_failure;
-        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        Transaction lock(*b);
         if(b->committing_||!b->flush_all())return runtime_failure;
         const Result result=b->destroy_session_(s);
         if(result==0&&s==b->binding_.session){
@@ -437,7 +539,8 @@ public:
     }
     static Result __stdcall on_begin_frame(Session s,const Base* info){
         Bridge* b=active_;if(!b||!b->begin_frame_)return runtime_failure;
-        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        Transaction lock(*b);
+        b->retire_observation(); // Frame boundary: no copy belongs to a closing frame.
         if(b->committing_||!b->images_.new_frame(b->actual_release()))return runtime_failure;
         for(auto& c:b->chains_)if(c.handle){
             b->clear_settled(c);
@@ -452,7 +555,8 @@ public:
     }
     static Result __stdcall on_end_frame(Session s,const xr_read::EndInfo* info){
         Bridge* b=active_;if(!b||!b->end_frame_)return runtime_failure;
-        std::lock_guard<std::recursive_mutex> lock(b->transaction_);
+        Transaction lock(*b);
+        b->retire_observation(); // Frame boundary: no copy belongs to a closing frame.
         if(b->committing_)return runtime_failure;
         if(b->fatal_frame_){(void)b->flush_all();return runtime_failure;}
         b->committing_=true;

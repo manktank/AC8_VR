@@ -186,11 +186,12 @@ void engine_tick(UEVR_UGameEngineHandle,float){
         api->functions->dispatch_lua_event("AC8_HUD_Refresh",refresh_reason.load());
 
 }
-// Bridge observation occurs BEFORE the plugin lock. XR callbacks lock in the
-// opposite direction (bridge -> plugin), so never call observed_image under it.
+// Bridge observation occurs BEFORE the plugin lock and reads only the bridge's
+// leaf snapshot, never its transaction lock: XR wrappers may hold that lock
+// while the runtime waits for a D3D11On12 worker that is executing this hook.
 void observe_copy(ID3D12GraphicsCommandList* list,ID3D12Resource* dst,ID3D12Resource* src,const D3D12_RECT& area,bool full){
-    acquired_images::Token token{};uint64_t frame=0;openxr_handoff::Binding binding;
-    const bool observed=active.load()&&!overlay.load()&&bridge.observed_image(dst,token,frame,binding);
+    acquired_images::Token token{};uint64_t frame=0;ID3D12Device* bridge_device=nullptr;
+    const bool observed=active.load()&&!overlay.load()&&bridge.observed_image(dst,token,frame,bridge_device);
     std::lock_guard<std::recursive_mutex> lock(mutex);
     if constexpr (selective_glow_performance::reporting) selective_glow_production::copy(list,dst,src);
     if constexpr (selective_glow_performance::reporting) {
@@ -226,7 +227,7 @@ void observe_copy(ID3D12GraphicsCommandList* list,ID3D12Resource* dst,ID3D12Reso
             if(generated){recorded.insert(list);static_cast<void>(0);state=overlay?"black_overlay_comparison_active":"waiting_current_scene_pair";}}
         catch(...){failed=true;stop("record_failed_off");}nested=false;
     }
-    if(overlay||!observed||binding.device.Get()!=device.Get())return;
+    if(overlay||!observed||bridge_device!=device.Get())return;
     if(!hud_route_scene::Renderer::supported(dst)){return;}
     
     // Every recognized scene copy must precede its final observed RT barrier.

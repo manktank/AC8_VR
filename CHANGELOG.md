@@ -1,5 +1,12 @@
 # Changelog
 
+## AC8-VR_MankTank_v0.3.3 — 2026-11-10
+
+- Fix a freeze when entering a mission with HUD glow enabled, where the picture could stop updating while audio continued.
+- Remove a conflict where two parts of the rendering system could wait on each other.
+- Confirmed working by the player who reported the freeze.
+- Full clean-install release with all scripts, plugins, HUD assets and default settings included.
+
 ## AC8-VR_MankTank_v0.3.2 — 2026-11-08
 
 - Package the tested build with the MankTank OpenXR layer ID.
