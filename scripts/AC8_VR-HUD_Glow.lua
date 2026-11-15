@@ -635,12 +635,34 @@ end
 -- the same HUD owner, and every returned name is revalidated live below.
 local fullDiscover=discover
 local sourceRequest,sourceReply,sourcePending=0,nil,nil
+local sourceHUD,sourceRoot,sourceHUDName,sourceRootName
+local sourceGeneration=0
 local sourceReplyTicks=4
-local function sendSourceRequest(event,owner)
+local function refreshSourceOwner()
+    local hud=call(call(api,'get_player_controller',0),'GetHUD')
+    local hudName=full(hud)
+    if not hudName then hud=nil end
+    local root=call(hud,'get_property','HudWidget')
+    local rootName=full(root)
+    if not rootName then root=nil end
+    if hud~=sourceHUD or root~=sourceRoot or hudName~=sourceHUDName or rootName~=sourceRootName then
+        sourceHUD,sourceRoot,sourceHUDName,sourceRootName=hud,root,hudName,rootName
+        sourceGeneration=sourceGeneration+1
+        sourcePending=nil;sourceReply=nil
+        S.root=nil;S.rootName=nil;S.roots={};S.candidates={}
+        S.nativeRootPaths={};S.nativeRootsUntil=nil;S.nextScan=0
+        resetRectangleCache()
+        if frameReads then frameReads={};frameBounds={};frameChains={}end
+    end
+end
+local function sendSourceRequest(event)
     sourceRequest=sourceRequest%999999999+1;sourceReply=nil
     local wanted=tostring(sourceRequest)
-    sourcePending={request=wanted,event=event,owner=owner,ticks=0}
-    if not pcall(function()api:dispatch_custom_event(event,wanted..(owner and '|'..owner or ''))end)then
+    sourcePending={request=wanted,event=event,hud=sourceHUD,root=sourceRoot,generation=sourceGeneration,ticks=0}
+    local owner=event=='AC8_GlowOwnedDiscoveryRequest'and sourceHUDName
+    local ok,err=pcall(function()api:dispatch_custom_event(event,wanted..(owner and '|'..owner or ''))end)
+    if not ok then
+        R.errors.glowDiscovery=tostring(err)
         sourcePending=nil;return false
     end
     return true
@@ -661,34 +683,24 @@ end
 -- rejects incomplete/stale links, and never scans the global Image population.
 -- Keep the existing roster as compatibility recovery (older DLLs/API/layouts).
 -- Returns images, 'pending' while a reply is outstanding, or nil for fallback.
-local function sourceImages(hud)
-    local owner=full(hud)
-    -- Ask the current bound trees first, including startup. The native service
-    -- retains the accepted portrait/radar masks; native ownership ABI readiness
-    -- alone cannot establish that native radar coverage reached the image.
-    -- The indexed compatibility request remains available if ownership fails.
-    if owner and owner:find('|',1,true)then owner=nil end
-    local pending=sourcePending
-    if pending and pending.owner and pending.owner~=owner then
-        pending=nil;sourcePending=nil;sourceReply=nil
-    end
-    if not pending then
-        local event=owner and'AC8_GlowOwnedDiscoveryRequest'or'AC8_GlowDiscoveryRequest'
-        if not sendSourceRequest(event,owner)then S.sourceFallbacks=(S.sourceFallbacks or 0)+1;return end
-        pending=sourcePending
-    end
-    local reply=sourceReply
-    if not reply or reply.request~=pending.request then
-        pending.ticks=pending.ticks+1
-        if pending.ticks<=sourceReplyTicks then return'pending'end
-        sourcePending=nil;sourceReply=nil;S.sourceFallbacks=(S.sourceFallbacks or 0)+1;return
-    end
-    sourcePending=nil;sourceReply=nil
-    local images=resolveSourceReply(reply)
-    if images then return images end
-    S.sourceFallbacks=(S.sourceFallbacks or 0)+1
-    if pending.event=='AC8_GlowOwnedDiscoveryRequest'and sendSourceRequest('AC8_GlowDiscoveryRequest')then
-        return sourceImages(hud)
+local function sourceImages()
+    local event=sourcePending and sourcePending.event or
+        (sourceHUDName and not sourceHUDName:find('|',1,true)and'AC8_GlowOwnedDiscoveryRequest'or'AC8_GlowDiscoveryRequest')
+    while event do
+        if sourcePending or sendSourceRequest(event)then
+            if not sourcePending then return'pending'end
+            local pending,reply=sourcePending,sourceReply
+            if not reply or reply.request~=pending.request then
+                pending.ticks=pending.ticks+1
+                if pending.ticks<=sourceReplyTicks then return'pending'end
+            else
+                local images=resolveSourceReply(reply)
+                if images then sourcePending=nil;sourceReply=nil;return images end
+            end
+        end
+        sourcePending=nil;sourceReply=nil
+        S.sourceFallbacks=(S.sourceFallbacks or 0)+1
+        event=event=='AC8_GlowOwnedDiscoveryRequest'and'AC8_GlowDiscoveryRequest'or nil
     end
 end
 -- Only policy-bearing images can require an additional viewport root. Walk
@@ -715,12 +727,9 @@ local function paintedRoot(w,addRoot,nativeWarm,depth,seen,isOwner)
     end
 end
 local function sourceDiscover()
-    local hud=call(call(api,'get_player_controller',0),'GetHUD')
-    local root=call(hud,'get_property','HudWidget');local rootName=full(root)
-    if not rootName then
-        S.root=nil;S.rootName=nil;S.roots={};S.candidates={};resetRectangleCache();return
-    end
-    local images=sourceImages(hud)
+    local hud,root,rootName=sourceHUD,sourceRoot,sourceRootName
+    if not hud or not root then return end
+    local images=sourceImages()
     if images=='pending'then return'pending'end
     if not images then return fullDiscover()end
     S.root=root;S.rootName=rootName;S.roots={};frameChains={}
@@ -883,16 +892,17 @@ end
 
 local function update(delta)
     if S.stopped then return end
+    frameReads={};frameBounds={};frameChains={}
+    refreshSourceOwner()
     if AC8Runtime.glowGameplayAllowed==false then
         if not S.gameplaySuspended then
-            publishPolicy({});S.gameplaySuspended=true;resetRectangleCache()
+            S.gameplaySuspended=true;resetRectangleCache()
         end
+        publishPolicy({})
+        frameReads=nil;frameBounds=nil;frameChains=nil;frameRootStamp=nil
         return
     end
     if S.gameplaySuspended then S.gameplaySuspended=false;S.nextScan=0;resetRectangleCache() end
-    local epoch=R.context and R.context.epoch
-    if epoch~=S.ownerEpoch then S.ownerEpoch=epoch;S.nextScan=0;resetRectangleCache() end
-    frameReads={};frameBounds={};frameChains={}
     S.elapsed=S.elapsed+math.max(0,math.min(tonumber(delta) or 0.016,1))
     if S.elapsed>=S.nextScan and discover()~='pending'then S.nextScan=S.elapsed+0.5 end
     local rectangles=buildPolicy()
@@ -904,8 +914,11 @@ uevr.sdk.callbacks.on_lua_event(function(name,data)
     if S.stopped or type(data)~='string'then return end
     if name=='AC8_GlowDiscoverySources'then
         if #data>1048576 then return end
+        refreshSourceOwner()
+        local pending=sourcePending
+        if not pending or pending.hud~=sourceHUD or pending.root~=sourceRoot or pending.generation~=sourceGeneration then return end
         local request,status,tail=data:match('^(%d+)|(%a+)(.*)$')
-        if request~=tostring(sourceRequest)or(status~='ok'and status~='fallback')then return end
+        if request~=pending.request or(status~='ok'and status~='fallback')then return end
         local names={}
         for n in (tail or''):gmatch('|([^|]+)')do
             if #names>=256 or not n:match('^[%w_]+ /Engine/Transient%.')then return end

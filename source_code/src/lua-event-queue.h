@@ -15,6 +15,7 @@
 // The queue mutex is a leaf: never held across dispatch or any UEVR call.
 #include <atomic>
 #include <cstddef>
+#include <exception>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -34,11 +35,15 @@ constexpr size_t limit=64;
 inline void post(const char* name,std::string data) noexcept{
     if(!name||!registered)return;
     try{
-        std::lock_guard<std::mutex> lock(mutex);
-        for(const auto& queued:pending)if(queued.name==name&&queued.data==data)return;
-        if(pending.size()>=limit)return;
-        pending.push_back(Event{name,std::move(data)});
-    }catch(...){}
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            for(const auto& queued:pending)if(queued.name==name&&queued.data==data)return;
+            if(pending.size()<limit){pending.push_back(Event{name,std::move(data)});return;}
+        }
+        if(host.log_error)host.log_error("[AC8] Deferred Lua event queue full; reply dropped: %s",name);
+    }catch(const std::exception& e){
+        if(host.log_error)host.log_error("[AC8] Deferred Lua reply failed: %s",e.what());
+    }
 }
 inline void drain(UEVR_UGameEngineHandle,float){
     std::vector<Event> ready;
