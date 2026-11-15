@@ -97,8 +97,8 @@ inline TargetScope::TargetScope(UEVR_UObjectHandle w,UEVR_UObjectHandle c,unsign
  currentTarget=&value;resolution::prepare(value,kind);
 }
 inline void notify(){
- if(host&&host->functions&&host->functions->dispatch_lua_event)
-  host->functions->dispatch_lua_event("AC8_ArrowLiveStatus",installed?"ready":!std::strcmp(state.load(),"waiting")?"waiting":"unavailable");
+ // Requests arrive inside Lua; queue instead of dispatching synchronously.
+ ac8_lua_events::post("AC8_ArrowLiveStatus",installed?"ready":!std::strcmp(state.load(),"waiting")?"waiting":"unavailable");
 }
 
 inline void event(const char* name,const char* data){

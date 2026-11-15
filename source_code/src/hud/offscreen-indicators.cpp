@@ -22,6 +22,7 @@
 #include <vector>
 #include <mutex>
 #include "../../vendor/uevr/plugin-api.h"
+#include "../lua-event-queue.h"
 #include "../backend/backend_boundary.h"
 #include "../viewport-helper.h"
 

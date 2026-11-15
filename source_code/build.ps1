@@ -9,9 +9,9 @@ New-Item -ItemType Directory -Path $ac8PluginOutput -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $ac8SourceRoot 'build/release/AC8_VR-Runtime.dll') -Destination (Join-Path $ac8PluginOutput 'AC8_VR-Features.bin')
 Push-Location -LiteralPath $ac8SourceRoot
 try {
- & $compiler /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /LD src/renderer/portable-layer.cpp /Fo:build/portable-layer.obj "/Fe:$ac8PluginOutput/AC8_VR-OpenXRBridge.dll" /link /INCREMENTAL:NO /IMPLIB:build/openxr-bridge.lib user32.lib
+ & $compiler /nologo /std:c++17 /EHsc /W4 /WX /O2 /Zi /Fd:build/bridge-compile.pdb /MT /LD src/renderer/portable-layer.cpp /Fo:build/portable-layer.obj "/Fe:$ac8PluginOutput/AC8_VR-OpenXRBridge.dll" /link /DEBUG:FULL /OPT:REF /OPT:ICF /INCREMENTAL:NO /IMPLIB:build/openxr-bridge.lib user32.lib
  if($LASTEXITCODE -ne 0){throw 'Portable OpenXR bridge build failed'}
- & $compiler /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /LD loader/loader.cpp /Fo:build/loader.obj "/Fe:$ac8PluginOutput/AC8_VR-Runtime.dll" /link /INCREMENTAL:NO /IMPLIB:build/loader.lib
+ & $compiler /nologo /std:c++17 /EHsc /W4 /WX /O2 /Zi /Fd:build/loader-compile.pdb /MT /LD loader/loader.cpp /Fo:build/loader.obj "/Fe:$ac8PluginOutput/AC8_VR-Runtime.dll" /link /DEBUG:FULL /OPT:REF /OPT:ICF /INCREMENTAL:NO /IMPLIB:build/loader.lib
  if($LASTEXITCODE -ne 0){throw 'UEVR loader build failed'}
  $ac8LayerOutput=Join-Path $ac8PluginOutput 'AC8_VR-OpenXRLayer'
  New-Item -ItemType Directory -Path $ac8LayerOutput -Force | Out-Null

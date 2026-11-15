@@ -14,6 +14,8 @@ From this directory run `build.ps1` using x64 MSVC C++ Build Tools and a Windows
 
 `build-native.ps1` builds six native modules plus `src/plugin.cpp` into an intermediate payload. `build.ps1` places it at `build/package/plugins/AC8_VR-Features.bin`, builds `loader/loader.cpp` as `AC8_VR-Runtime.dll`, and builds `portable-layer.cpp` as `AC8_VR-OpenXRBridge.dll`. It copies the relative manifest and the 49 assets in `runtime-assets.txt` into that output tree. Never substitute the intermediate native DLL for the thin loader or load the payload a second time as a DLL plugin.
 
+Optimized builds also generate full linker PDBs. Retain `build/release/AC8_VR-Runtime.pdb` for the **feature payload**, and `build/package/plugins/AC8_VR-Runtime.pdb` and `AC8_VR-OpenXRBridge.pdb` for the loader and bridge. Keep the exact matching binaries/PDBs privately before rebuilding; a later build's symbols cannot reliably diagnose an earlier dump. PDBs are not required in the installed profile and can contain developer paths.
+
 | Native source | Responsibility |
 |---|---|
 | `src/plugin.cpp`, `src/module-selection.h` | Select native features from actual Lua-file presence; absent modules register no feature work. |
@@ -37,10 +39,13 @@ From this directory run `build.ps1` using x64 MSVC C++ Build Tools and a Windows
 - Geometry and image-write permission are separate. Require current-frame acquired/waited tokens, matching session/generation, valid layers/subrects and queue/fence ownership. Retain resources on failure/reset; never modify released images.
 - The portable glow layer observes the current loader chain. If OFXR is active, select its complete public application-facing dispatch; do not conflate its private presentation calls with the game's transaction. No partial provider mix or private offset fallback.
 - Other native game hooks keep their binary/reflection guards. Unknown/mixed/stale evidence forwards safely.
+- Never call `dispatch_lua_event` from an `on_custom_event` handler or any other code Lua can reach synchronously. UEVR locks its loader before a script context; Lua callbacks already hold the context lock, so a nested dispatch inverts that order and deadlocks against any other thread dispatching Lua events (UEVR menu/config, or plugins such as CheekyFoveatedDLSS on the RHI thread). Reply with `ac8_lua_events::post` (`src/lua-event-queue.h`), which delivers on the next native pre-engine tick; Lua must accept the reply asynchronously. Native engine-tick dispatches are safe.
 
 ## State, source and validation
 
-Player builds contain no capture hotkeys, profiling collectors or diagnostic dashboards. Functional error handling, ownership/state validation, restoration journals, caches and control flags remain. Record any temporary diagnostic added during development and remove it before packaging. Private tests/captures stay outside public exports; inert compile-time fixture seams may remain.
+Player builds contain no capture hotkeys, profiling collectors or diagnostic dashboards. Functional error handling, ownership/state validation, restoration journals, caches and control flags remain. Bounded local runtime logging is supported: `src/runtime-log.h` retains two files of at most 8 MiB each and mirrors native host log calls without changing their format arguments. Core reports section startup, callback tracebacks and changed runtime errors; the renderer reports startup/lifecycle, bridge admission, device failures and five-second status. Callback errors retain existing isolation and are rate-limited per callback, with occurrence counts. Expected reflection/liveness probe failures remain guarded and are not individually logged.
+
+Optional `data/AC8_VR-TraceCallbacks.flag` enables synchronous Lua dispatcher and renderer callback boundaries for one diagnostic run; do not ship this flag. No exception handler is installed and no GPU/image ownership checks are bypassed. See [crash/freeze collection](../docs/COMPATIBILITY.md#crash-and-freeze-diagnostics). Record any other temporary diagnostic added during development and remove it before packaging. Private tests/captures stay outside public exports; inert compile-time fixture seams may remain.
 
 Preserve inherited/community and vendor attribution. Do not publish personal paths, game archives, saves, keys/extraction tools, logs or backups. Keep all custom runtime names prefixed `AC8_VR-`, except `ac8-hud-assets` and its contents.
 

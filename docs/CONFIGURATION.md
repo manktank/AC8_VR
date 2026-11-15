@@ -32,3 +32,7 @@ The editable `HUD_PRESENTATION` block in HUD Layout supplies initial distance 1m
 Other supplied `AC8_VR-*Controls.json` files contain feature settings. Changes made directly on disk generally require a script/game restart; prefer the exposed controls. Recovery journals and baseline/cache files are generated for functional restoration and should not be copied into fresh packages. Back up the profile before changing files.
 
 All scripts/data/plugin names use `AC8_VR-`; `ac8-hud-assets` and every file inside it are intentionally exempt. Standard UEVR config/folder names remain standard. Personal UEVR `cameras.txt` slots are separate and are not supplied.
+
+## Runtime logging
+
+Local crash-diagnostic logging is automatic in the native payload. Logs are written to the active UEVR game-profile root, not `data` or the source checkout. For collection instructions and optional callback tracing, see [crash and freeze diagnostics](COMPATIBILITY.md#crash-and-freeze-diagnostics). Logging does not change feature selection or saved camera/HUD settings.

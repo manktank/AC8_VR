@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include "../../vendor/uevr/plugin-api.h"
+#include "../lua-event-queue.h"
 #include "glow-routing-mode.h"
 namespace glow_discovery {
 using Object=UEVR_UObjectHandle;
@@ -101,8 +102,8 @@ inline void event(const char* eventName,const char* data){
   {std::lock_guard<std::mutex> guard(mutex);ok=scoped?owned::collect(tail+1,sources):collect(sources);}
   response+=ok?"|ok":"|fallback";if(ok)response+=sources;
  }catch(...){response+="|fallback";}
- // Dispatch outside the lock: Lua may request other native services in reply.
- host->functions->dispatch_lua_event("AC8_GlowDiscoverySources",response.c_str());
+ // Never reply synchronously: this runs inside Lua (see lua-event-queue.h).
+ ac8_lua_events::post("AC8_GlowDiscoverySources",std::move(response));
 }
 inline bool initialize(const UEVR_PluginInitializeParam* api){
  if(!api||!api->functions||!api->functions->dispatch_lua_event||!api->callbacks||!api->callbacks->on_custom_event||!api->sdk)return false;

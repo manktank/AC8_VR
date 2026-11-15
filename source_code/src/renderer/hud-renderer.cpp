@@ -20,6 +20,7 @@
 #include <intrin.h>
 #include <cstdio>
 #include <sstream>
+#include "../runtime-log.h"
 
 namespace hud_renderer {
 using Microsoft::WRL::ComPtr;
@@ -90,6 +91,7 @@ ID3D12Resource* safe_ui(){
 }
 void stop(const char* reason){active=false;if(renderer)renderer->policy({});state=reason;
     if(failed&&std::strcmp(reason,"left_flight_off")&&std::strcmp(reason,"manual_off"))failure_reason=reason;
+    if(failed)ac8_runtime_log::error("[AC8 renderer] stopped: %s",reason);
     }
 bool enabled(){return active&&!failed&&!cover_active;}
 hud_policy::PacketCache policy_packets;
@@ -126,6 +128,7 @@ void lifecycle(const char* event,const char* data){
     if(event&&!std::strcmp(event,"AC8_GlowFixQuery")){brightness_report_requested=true;return;}
     if(event&&data&&!std::strcmp(event,"AC8_HUD_PolicyV50")){std::lock_guard<std::recursive_mutex> guard(mutex);const auto policy=policy_packets.update(data,GetTickCount64());if(renderer)renderer->policy(policy);return;}
     if(!event||!data||std::strcmp(event,"AC8_HUD_GlowLifecycle"))return;
+    ac8_runtime_log::info("[AC8 renderer] lifecycle=%s",data);
     std::lock_guard<std::recursive_mutex> guard(mutex);
     if(!std::strcmp(data,"menu_blend_enter")||!std::strcmp(data,"menu_blend_exit")){
         menu_presentation=!std::strcmp(data,"menu_blend_enter");return;
@@ -159,6 +162,10 @@ void lifecycle(const char* event,const char* data){
 }
 
 void engine_tick(UEVR_UGameEngineHandle,float){
+    ac8_runtime_log::Scope trace("renderer.engine_tick");
+    static ULONGLONG next_log=0;
+    const auto now=GetTickCount64();
+    if(now>=next_log){next_log=now+5000;ac8_runtime_log::write("heartbeat","renderer.engine_tick");}
     radio_paint_marker::engine_tick(); // TEMP targeted redraws; no added callback.
     if constexpr (selective_glow_performance::reporting) selective_glow_batch_capture::engine_tick();
     // Native target creation may flush RHI work: never hold the renderer lock.
@@ -391,6 +398,7 @@ bool ensure_scene_resources(ID3D12Resource* scene){
     return true;
 }
 openxr_handoff::FrameOutcome frame_sink(openxr_handoff::Session session,const xr_read::EndInfo* info,const openxr_handoff::Held* held,size_t count,uint64_t frame,ID3D12Device* actual_device,ID3D12CommandQueue* queue,void*){
+    ac8_runtime_log::Scope trace("renderer.frame_sink");
     using Outcome=openxr_handoff::FrameOutcome;std::lock_guard<std::recursive_mutex> lock(mutex);
     
     if(!enabled()||overlay||actual_device!=device.Get()||!queue)return Outcome::unchanged;
@@ -441,10 +449,18 @@ bool reset_can_resume(bool same_device,bool healthy,bool direct_queue,uint64_t c
         completed!=UINT64_MAX&&completed>=fence_value;
 }
 void present(){
+    ac8_runtime_log::Scope trace("renderer.present");
     selective_glow_split::cadence(true);
     selective_glow_performance::frame(true); // TEMP explicit on/off CPU/cadence sample.
     if(!bridge_installed&&!failed)try_portable_bridge();
     std::lock_guard<std::recursive_mutex> lock(mutex);ui=safe_ui();
+    static ULONGLONG next_log=0;
+    const auto now=GetTickCount64();
+    if(now>=next_log){
+        next_log=now+5000;
+        ac8_runtime_log::info("[AC8 renderer] state=%s failure=%s active=%d bridge=%d reset=%d frame=%llu fence=%llu",
+            state,failure_reason,active.load(),bridge_installed,reset_pending,generation_frame,fence_value);
+    }
     if(failed||!api||!renderer||!fence)return;
     const auto* current_device=static_cast<ID3D12Device*>(api->renderer->device);
     auto* queue=static_cast<ID3D12CommandQueue*>(api->renderer->command_queue);
@@ -453,7 +469,12 @@ void present(){
         state="waiting_for_original_device";return;
     }
     const auto completed=fence->GetCompletedValue();
-    if(completed==UINT64_MAX||device->GetDeviceRemovedReason()!=S_OK){failed=true;stop("device_removed_off");return;}
+    const auto removed=device->GetDeviceRemovedReason();
+    if(completed==UINT64_MAX||removed!=S_OK){
+        ac8_runtime_log::error("[AC8 renderer] device removed HRESULT=0x%08lx completed=%llu submitted=%llu",
+            static_cast<unsigned long>(removed),completed,fence_value);
+        failed=true;stop("device_removed_off");return;
+    }
     for(auto& value:split_submitted){
         if(value.ticket!=UINT64_MAX&&value.ticket<=completed)
             renderer->recycleSplit(value.lease);
@@ -485,6 +506,8 @@ void present(){
     }
 }
 void device_reset(){
+    ac8_runtime_log::Scope trace("renderer.device_reset");
+    ac8_runtime_log::info("[AC8 renderer] Device reset requested");
     std::lock_guard<std::recursive_mutex> lock(mutex);
     if(selective_glow_split::handoff.started()){
         selective_glow_split::handoff.invalidate("snapshot_device_reset_restart_required");
@@ -500,6 +523,12 @@ bool try_portable_bridge(){
     next_bridge_retry=now+1000;
     const bool connected=bridge.attach(api,{can_hold,frame_sink,nullptr});
     const auto xr=bridge.status();
+    static const char* last_state=nullptr;
+    if(last_state!=xr.attach_state||connected||xr.disabled||xr.hook_failure!=99){
+        last_state=xr.attach_state;
+        ac8_runtime_log::info("[AC8 OpenXR] connected=%d route=%s attach=%s provider=%s lookup=%s result=%ld hook_failure=%u disabled=%d",
+            connected,xr.route,xr.attach_state,xr.provider,xr.lookup_name,static_cast<long>(xr.lookup_result),xr.hook_failure,xr.disabled);
+    }
     if(connected&&api->openxr&&api->openxr->get_xr_session)
         late_session_recovered=bridge.adopt_existing_session(reinterpret_cast<void*>(api->openxr->get_xr_session()),device.Get(),static_cast<ID3D12CommandQueue*>(api->renderer->command_queue));
     std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -525,13 +554,22 @@ bool initialize(const UEVR_PluginInitializeParam* params){
     const int c=api->functions->register_inline_hook(methods[10],reinterpret_cast<void*>(&reset),reinterpret_cast<void**>(&original_reset));
     const int d=api->functions->register_inline_hook(methods[16],reinterpret_cast<void*>(&region),reinterpret_cast<void**>(&original_region));
     const int e=api->functions->register_inline_hook(methods[26],reinterpret_cast<void*>(&barriers),reinterpret_cast<void**>(&original_barrier));
-    if(a<0||b<0||c<0||d<0||e<0||!original_copy||!original_execute||!original_reset||!original_region||!original_barrier){failed=true;state="hook_failed_off";return false;}
+    if(a<0||b<0||c<0||d<0||e<0||!original_copy||!original_execute||!original_reset||!original_region||!original_barrier){
+        failed=true;state="hook_failed_off";
+        ac8_runtime_log::error("[AC8 renderer] Hook installation failed: copy=%d execute=%d reset=%d region=%d barrier=%d",a,b,c,d,e);
+        return false;
+    }
     radio_paint_marker::initialize(api,assets_path); // Failure disables only the temporary marker.
     selective_glow_batch_capture::initialize(api); // All entry guards checked before registration.
     selective_glow_split::initialize(api);
     split_submitted.reserve(64); // Bound snapshot/choice lifetime to existing fences.
     try_portable_bridge();
-    if(!api->callbacks->on_present(present)){failed=true;state="callback_failed_off";}if(api->callbacks->on_device_reset)api->callbacks->on_device_reset(device_reset);return !failed;
+    if(!api->callbacks->on_present(present)){
+        failed=true;state="callback_failed_off";ac8_runtime_log::error("[AC8 renderer] Present callback registration failed");
+    }
+    if(api->callbacks->on_device_reset&&!api->callbacks->on_device_reset(device_reset))
+        ac8_runtime_log::error("[AC8 renderer] Device-reset callback registration failed");
+    return !failed;
 }
 }
 extern "C"  void uevr_plugin_required_version(UEVR_PluginVersion* v){if(v)*v={UEVR_PLUGIN_VERSION_MAJOR,UEVR_PLUGIN_VERSION_MINOR,UEVR_PLUGIN_VERSION_PATCH};}
@@ -543,8 +581,8 @@ extern "C"  bool uevr_plugin_initialize(const UEVR_PluginInitializeParam* p){
     if(p->sdk&&p->sdk->callbacks&&p->sdk->callbacks->on_pre_engine_tick)p->sdk->callbacks->on_pre_engine_tick(engine_tick);
     if(p->callbacks&&p->callbacks->on_custom_event)p->callbacks->on_custom_event(lifecycle);
     if(!p->renderer||!p->sdk||!p->sdk->stereo_hook||!p->sdk->frhitexture2d||!p->callbacks||!p->sdk->stereo_hook->get_ui_render_target||!p->sdk->frhitexture2d->get_native_resource||!p->callbacks->on_present||!p->functions->register_inline_hook||p->renderer->renderer_type!=UEVR_RENDERER_D3D12||!p->renderer->device||!p->renderer->command_queue){
-        failed=true;state=failure_reason="required_d3d12_api_unavailable";static_cast<void>(0);return false;}
+        failed=true;state=failure_reason="required_d3d12_api_unavailable";ac8_runtime_log::error("[AC8 renderer] %s",failure_reason);return false;}
     if(!p->vr||!p->vr->is_openxr||!p->vr->is_openxr()){
-        failed=true;state=failure_reason="openvr_not_supported";static_cast<void>(0);return false;}
-    try{return initialize(p);}catch(const std::exception& e){failed=true;state=failure_reason="initialization_failed_off";if(p->functions->log_error)p->functions->log_error("[AC8 Glow] Initialization failed: %s",e.what());return false;}catch(...){failed=true;state=failure_reason="initialization_failed_off";return false;}
+        failed=true;state=failure_reason="openvr_not_supported";ac8_runtime_log::error("[AC8 renderer] %s",failure_reason);return false;}
+    try{return initialize(p);}catch(const std::exception& e){failed=true;state=failure_reason="initialization_failed_off";if(p->functions->log_error)p->functions->log_error("[AC8 Glow] Initialization failed: %s",e.what());return false;}catch(...){failed=true;state=failure_reason="initialization_failed_off";ac8_runtime_log::error("[AC8 Glow] Initialization failed: unknown C++ exception");return false;}
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — v0.3.4 candidate
+
+- Fix the remaining in-mission freeze where the picture stopped while audio continued. A memory dump showed the game thread (HUD glow discovery) and the render thread (another UEVR plugin delivering a Lua event, here CheekyFoveatedDLSS) waiting on each other's UEVR Lua locks. The v0.3.3 change addressed a different wait and did not cover this.
+- Native replies to Lua requests (glow source discovery, plane view, arrow live controls, log mode) are now delivered on the next engine tick instead of inside the Lua call. Glow discovery waits briefly for the reply and keeps its previous, revalidated sources meanwhile.
+- Added logging functionality to help diagnose issues.
+
 ## AC8-VR_MankTank_v0.3.3 — 2026-11-10
 
 - Fix a freeze when entering a mission with HUD glow enabled, where the picture could stop updating while audio continued.

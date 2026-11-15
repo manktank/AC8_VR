@@ -5,6 +5,7 @@
 #include <string>
 #include <cstdlib>
 #include <cstring>
+#include "lua-event-queue.h"
 namespace plane_view {
 inline const UEVR_PluginInitializeParam* host=nullptr;
 inline bool checked=false,code_ok=false;
@@ -42,7 +43,7 @@ inline void event(const char* event,const char* data){
   }
  }
  const auto reply=std::to_string(serial)+"|"+std::to_string(selected);
- host->functions->dispatch_lua_event("AC8_PlaneViewBootstrapResult",reply.c_str());
+ ac8_lua_events::post("AC8_PlaneViewBootstrapResult",reply); // Runs inside Lua: never reply synchronously.
 }
 inline bool initialize(const UEVR_PluginInitializeParam* p){
  host=p;

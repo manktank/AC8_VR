@@ -629,21 +629,28 @@ local function discover()
 end
 
 -- Narrow native source roster; retain old discovery when the helper/API is
--- absent, incomplete or asynchronously delivered. No stale roster is accepted.
+-- absent, incomplete or never answers. Native replies arrive on a later engine
+-- tick: answering inside this Lua callback would invert UEVR's Lua lock order
+-- and can freeze the game. A reply is accepted only for the latest request and
+-- the same HUD owner, and every returned name is revalidated live below.
 local fullDiscover=discover
-local sourceRequest,sourceReply=0,nil
-local function querySources(event,owner)
+local sourceRequest,sourceReply,sourcePending=0,nil,nil
+local sourceReplyTicks=4
+local function sendSourceRequest(event,owner)
     sourceRequest=sourceRequest%999999999+1;sourceReply=nil
     local wanted=tostring(sourceRequest)
-    pcall(function()api:dispatch_custom_event(event,wanted..(owner and '|'..owner or ''))end)
-    local reply=sourceReply;sourceReply=nil
-    if not reply or reply.request~=wanted or reply.status~='ok'then
-        S.sourceFallbacks=(S.sourceFallbacks or 0)+1;return
+    sourcePending={request=wanted,event=event,owner=owner,ticks=0}
+    if not pcall(function()api:dispatch_custom_event(event,wanted..(owner and '|'..owner or ''))end)then
+        sourcePending=nil;return false
     end
+    return true
+end
+local function resolveSourceReply(reply)
+    if reply.status~='ok'then return end
     local result={}
     for _,n in ipairs(reply.names)do
         local w=call(api,'find_uobject',n)
-        if not w or full(w)~=n then S.sourceFallbacks=(S.sourceFallbacks or 0)+1;return end
+        if not w or full(w)~=n then return end
         result[#result+1]=w
     end
     S.nativeSourceQueries=(S.nativeSourceQueries or 0)+1
@@ -653,17 +660,36 @@ end
 -- Prefer the current HUD's own trees. The native walk uses reflected ownership,
 -- rejects incomplete/stale links, and never scans the global Image population.
 -- Keep the existing roster as compatibility recovery (older DLLs/API/layouts).
+-- Returns images, 'pending' while a reply is outstanding, or nil for fallback.
 local function sourceImages(hud)
     local owner=full(hud)
     -- Ask the current bound trees first, including startup. The native service
     -- retains the accepted portrait/radar masks; native ownership ABI readiness
     -- alone cannot establish that native radar coverage reached the image.
     -- The indexed compatibility request remains available if ownership fails.
-    if owner and not owner:find('|',1,true)then
-        local images=querySources('AC8_GlowOwnedDiscoveryRequest',owner)
-        if images then return images end
+    if owner and owner:find('|',1,true)then owner=nil end
+    local pending=sourcePending
+    if pending and pending.owner and pending.owner~=owner then
+        pending=nil;sourcePending=nil;sourceReply=nil
     end
-    return querySources('AC8_GlowDiscoveryRequest')
+    if not pending then
+        local event=owner and'AC8_GlowOwnedDiscoveryRequest'or'AC8_GlowDiscoveryRequest'
+        if not sendSourceRequest(event,owner)then S.sourceFallbacks=(S.sourceFallbacks or 0)+1;return end
+        pending=sourcePending
+    end
+    local reply=sourceReply
+    if not reply or reply.request~=pending.request then
+        pending.ticks=pending.ticks+1
+        if pending.ticks<=sourceReplyTicks then return'pending'end
+        sourcePending=nil;sourceReply=nil;S.sourceFallbacks=(S.sourceFallbacks or 0)+1;return
+    end
+    sourcePending=nil;sourceReply=nil
+    local images=resolveSourceReply(reply)
+    if images then return images end
+    S.sourceFallbacks=(S.sourceFallbacks or 0)+1
+    if pending.event=='AC8_GlowOwnedDiscoveryRequest'and sendSourceRequest('AC8_GlowDiscoveryRequest')then
+        return sourceImages(hud)
+    end
 end
 -- Only policy-bearing images can require an additional viewport root. Walk
 -- those few reciprocal owner paths, not every UserWidget in the process.
@@ -695,6 +721,7 @@ local function sourceDiscover()
         S.root=nil;S.rootName=nil;S.roots={};S.candidates={};resetRectangleCache();return
     end
     local images=sourceImages(hud)
+    if images=='pending'then return'pending'end
     if not images then return fullDiscover()end
     S.root=root;S.rootName=rootName;S.roots={};frameChains={}
     local prefixes={}
@@ -773,7 +800,8 @@ local function sourceDiscover()
     for _,c in ipairs(S.candidates)do for _,ancestor in ipairs(chain(c.widget)or{})do keep[ancestor]=true end end
     for w in pairs(rectangleCache)do if not keep[w]then rectangleCache[w]=nil end end
 end
--- Ordinary sampling: parent discovery includes synchronous native roster work.
+-- Ordinary sampling: the native roster reply arrives on a following engine
+-- tick; the previous, per-frame revalidated candidates remain until then.
 -- Native event callbacks also retain their existing CPU wrapper ownership.
 discover=sourceDiscover
 
@@ -866,7 +894,7 @@ local function update(delta)
     if epoch~=S.ownerEpoch then S.ownerEpoch=epoch;S.nextScan=0;resetRectangleCache() end
     frameReads={};frameBounds={};frameChains={}
     S.elapsed=S.elapsed+math.max(0,math.min(tonumber(delta) or 0.016,1))
-    if S.elapsed>=S.nextScan then discover();S.nextScan=S.elapsed+0.5 end
+    if S.elapsed>=S.nextScan and discover()~='pending'then S.nextScan=S.elapsed+0.5 end
     local rectangles=buildPolicy()
     publishPolicy(rectangles)
     frameReads=nil;frameBounds=nil;frameChains=nil;frameRootStamp=nil

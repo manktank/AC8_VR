@@ -2,6 +2,18 @@
 -- Core: see source_code/README.md for ownership and dependencies.
 -- AC8 VR: register sections; Core starts them in explicit dependency order.
 -- Core stays loaded. Optional files may be absent; selection freezes on the first engine tick.
+local logDispatchFailed=false
+local function runtimeLog(message,trace)
+ local text=tostring(message):sub(1,3500)
+ if not trace then print('[AC8] '..text)end
+ local ok,err=pcall(function()uevr.api:dispatch_custom_event('AC8_VR_LuaLog',text)end)
+ if not ok and not logDispatchFailed then
+  logDispatchFailed=true;print('[AC8 logging] Native log dispatch failed: '..tostring(err))
+ end
+end
+local function traceback(err)
+ return debug and debug.traceback and debug.traceback(tostring(err),2)or tostring(err)
+end
 local registry = rawget(_G, 'AC8VRModules')
 if not registry then
  registry = {sections={}, state='waiting', completed={}}
@@ -351,6 +363,26 @@ registry.sections['core'] = function(R)
 local real=uevr;local realJSON=json
 local R={version=105,tick=0,domains={},connected={},context={epoch=0},cache={},errors={},inheritedSetup={},layoutEnabled=false}
 _G.AC8Runtime=R
+R.log=runtimeLog
+R.traceCallbacks=false
+local reportedErrors={}
+local nextHeartbeat=0
+local function reportErrors()
+ for name,err in pairs(R.errors)do
+  if reportedErrors[name]~=err then
+   reportedErrors[name]=err;runtimeLog('error tick='..R.tick..' '..name..': '..tostring(err))
+  end
+ end
+end
+real.sdk.callbacks.on_lua_event(function(name,data)
+ if name=='AC8_VR_LogMode'then
+  R.traceCallbacks=data=='trace'
+  runtimeLog('Lua logging connected; callbacks='..tostring(data))
+ end
+end)
+local logModeOK,logModeError=pcall(function()real.api:dispatch_custom_event('AC8_VR_LogMode','query')end)
+if not logModeOK then runtimeLog('Native log-mode query failed: '..tostring(logModeError))end
+runtimeLog('Lua Core startup; runtime='..R.version)
 R.ensureTutorialState=function()return ensureTutorialState(R)end
 R.newHUDDefaultsStore=newHUDDefaultsStore
 local order={'presentation','admission','layout','camera','utility','loading','intro','development'}
@@ -465,14 +497,38 @@ end
 function R.connect(key)
  if R.connected[key]then return end;R.connected[key]=true
  real.sdk.callbacks[key](function(...)
+  if R.traceCallbacks then runtimeLog('begin callback='..key..' tick='..R.tick,true)end
   if key=='on_pre_engine_tick'then
    if registry.state=='waiting'then registry.start(true)end
    R.contextTick()
   elseif key=='on_post_engine_tick'or key=='on_pre_viewport_client_draw'then R.contextTick(false)end
   for _,domain in ipairs(order)do
    local rows=(domain~='layout'or R.layoutEnabled)and R.domains[domain]and R.domains[domain][key]
-   if rows then for _,row in ipairs(rows)do local ok,err=pcall(row.fn,...);if not ok then R.errors[row.name]=tostring(err)end end end
+   if rows then for _,row in ipairs(rows)do
+    if R.traceCallbacks then runtimeLog('begin '..row.name..' tick='..R.tick,true)end
+    local ok,err=xpcall(row.fn,traceback,...)
+    if not ok then
+     R.errors[row.name]=tostring(err)
+     local now=os.time()
+     local signature=tostring(err):match('^[^\r\n]*')
+     row.errorCount=(row.errorCount or 0)+1
+     if row.lastError~=signature or now>=(row.nextErrorLog or 0)then
+      runtimeLog('callback error tick='..R.tick..' '..row.name..' occurrences='..row.errorCount..': '..tostring(err))
+      row.lastError=signature;row.nextErrorLog=now+5;row.errorCount=0
+     end
+     reportedErrors[row.name]=tostring(err)
+    end
+    if R.traceCallbacks then runtimeLog('end '..row.name..' tick='..R.tick,true)end
+   end end
   end
+  if key=='on_pre_engine_tick'then
+   local now=os.time()
+   if now>=nextHeartbeat then
+    nextHeartbeat=now+5
+    runtimeLog('heartbeat tick='..R.tick..' registry='..registry.state,true);reportErrors()
+   end
+  end
+  if R.traceCallbacks then runtimeLog('end callback='..key..' tick='..R.tick,true)end
  end)
 end
 function R.host(domain,name)
@@ -490,9 +546,8 @@ local journals={['AC8_VR-CockpitScaleRestore.json']=true,['AC8_VR-CinematicUIRes
 R.json={load_file=R.read,dump_file=function(name,value,indent)
  if journals[name]then R.cache[name]=nil;return realJSON.dump_file(name,value,indent)end
 end}
-function R.log()end
 R.inventory=newSharedDiscovery(R,real)
-real.sdk.callbacks.on_script_reset(function()R.inventory.invalidate()end)
+real.sdk.callbacks.on_script_reset(function()runtimeLog('Lua script reset');R.inventory.invalidate()end)
 R.connect('on_pre_engine_tick')
 
 
@@ -662,9 +717,11 @@ end
 local required={'core','cutscene_guard','inherited_hud','mission_loading','glow_lifecycle','target_presentation','target_labels','target_animation','target_pins','target_materials','hud_policy','glow_brightness','tutorial_fill','pause_attachment','transitions','aircraft_presets','plane_camera','cinematic','cinematic_ownership','hud_layout','loading_icon','gameplay_camera'}
 registry.required=required;registry.started={};registry.status={};registry.dependencies={}
 local function initialize(key)
- local ok,err=pcall(registry.sections[key],rawget(_G,'AC8Runtime'))
- if not ok then registry.state='failed';registry.error=key..': '..tostring(err);error(registry.error)end
+ runtimeLog('section initialization begin: '..key)
+ local ok,err=xpcall(registry.sections[key],traceback,rawget(_G,'AC8Runtime'))
+ if not ok then registry.state='failed';registry.error=key..': '..tostring(err);runtimeLog('section initialization failed: '..registry.error);error(registry.error)end
  registry.started[key]=true;registry.status[key]='started';registry.completed[#registry.completed+1]=key
+ runtimeLog('section initialization complete: '..key)
 end
 function registry.start(finalize)
  if registry.state=='failed'or registry.state=='starting'or registry.state=='ready'then return end
@@ -690,6 +747,8 @@ function registry.start(finalize)
   end
  end
  registry.state='ready'
+ runtimeLog('Lua startup complete; sections='..table.concat(registry.completed,','))
+ for _,key in ipairs(required)do if registry.status[key]=='file not selected'then runtimeLog('section not selected: '..key)end end
  
 end
 registry.start()

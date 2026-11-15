@@ -21,10 +21,10 @@ try{
  $objects=@()
  foreach($module in $modules.PSObject.Properties){
   $name=$module.Name;$obj="$buildRoot/$name.obj"
-  & $compiler /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /c @reportingDefines "/Duevr_plugin_initialize=ac8_${name}_initialize" "/Duevr_plugin_required_version=ac8_${name}_version" $module.Value "/Fo:$obj"
+  & $compiler /nologo /std:c++17 /EHsc /W4 /WX /O2 /Zi "/Fd:$buildRoot/ac8-compile.pdb" /MT /c @reportingDefines "/Duevr_plugin_initialize=ac8_${name}_initialize" "/Duevr_plugin_required_version=ac8_${name}_version" $module.Value "/Fo:$obj"
   if($LASTEXITCODE -ne 0){throw "Module build failed: $name"};$objects+=$obj
  }
- & $compiler /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /LD @reportingDefines src/plugin.cpp @objects "/Fo:$buildRoot/ac8_vr.obj" "/Fe:$buildRoot/AC8_VR-Runtime.dll" /link /INCREMENTAL:NO "/OUT:$buildRoot/AC8_VR-Runtime.dll" user32.lib d3d12.lib dxgi.lib dxguid.lib gdi32.lib bcrypt.lib d3dcompiler.lib
+ & $compiler /nologo /std:c++17 /EHsc /W4 /WX /O2 /Zi "/Fd:$buildRoot/ac8-compile.pdb" /MT /LD @reportingDefines src/plugin.cpp @objects "/Fo:$buildRoot/ac8_vr.obj" "/Fe:$buildRoot/AC8_VR-Runtime.dll" /link /DEBUG:FULL /OPT:REF /OPT:ICF /INCREMENTAL:NO "/OUT:$buildRoot/AC8_VR-Runtime.dll" user32.lib d3d12.lib dxgi.lib dxguid.lib gdi32.lib bcrypt.lib d3dcompiler.lib
  if($LASTEXITCODE -ne 0){throw 'Combined AC8_VR-Runtime.dll link failed'}
  $shaderRoot='src/renderer'
  foreach($spec in @(@('FrameMaskVS','vs_5_0','AC8_VR-frame-mask-VS.dxbc'),@('FrameMaskPS','ps_5_0','AC8_VR-frame-mask-PS.dxbc'))){
