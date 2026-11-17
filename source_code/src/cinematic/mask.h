@@ -13,15 +13,12 @@
 
 
 #include "lens_projection.h"
-#include "../backend/backend_boundary.h"
+#include "../renderer/openxr_handoff.h"
 namespace cinema_mask {
 using Microsoft::WRL::ComPtr;
 using Result=int32_t;using Handle=void*;
-struct Base {int32_t type;const void* next;};
-struct Create {int32_t type;const void* next;uint64_t flags,usage;int64_t format;uint32_t samples,width,height,faces,arrays,mips;};
-struct Image {int32_t type;void* next;ID3D12Resource* resource;};
-struct Wait {int32_t type;const void* next;int64_t timeout;};
-static_assert(sizeof(Create)==64 && sizeof(Image)==24 && sizeof(Wait)==24);
+struct Wait {openxr_handoff::Base header;int64_t timeout;};
+static_assert(sizeof(Wait)==24);
 inline const UEVR_PluginInitializeParam* host=nullptr;
 inline std::atomic<bool> requested=false;
 inline std::atomic<bool> full_view=false;
@@ -40,14 +37,10 @@ inline float anchored_distance=0;
 inline std::atomic<float> shown_width=0,shown_height=0,shown_distance=0;
 inline std::atomic<float> frame_size_override=0,frame_distance_override=0;
 inline std::recursive_mutex lock;
+inline openxr_handoff::PresentationApi xr{};
 inline xr_read::EndFn original_end=nullptr;
-inline Result(__stdcall* create_chain)(Handle,const Create*,Handle*)=nullptr;
-inline Result(__stdcall* enumerate_images)(Handle,uint32_t,uint32_t*,Image*)=nullptr;
-inline Result(__stdcall* acquire)(Handle,const Base*,uint32_t*)=nullptr;
-inline Result(__stdcall* wait_image)(Handle,const Wait*)=nullptr;
-inline Result(__stdcall* release)(Handle,const Base*)=nullptr;
-inline Result(__stdcall* formats)(Handle,uint32_t,uint32_t*,int64_t*)=nullptr;
-inline Handle session=nullptr,chain=nullptr;
+inline Handle session=nullptr;
+inline openxr_handoff::Swapchain chain=0;
 inline ComPtr<ID3D12Device> device;
 inline ComPtr<ID3D12CommandQueue> queue;
 inline ComPtr<ID3D12DescriptorHeap> rtvs;
@@ -57,7 +50,7 @@ inline ComPtr<ID3D12PipelineState> pipeline;
 struct Slot {ID3D12Resource* resource=nullptr;ComPtr<ID3D12CommandAllocator> allocator;ComPtr<ID3D12GraphicsCommandList> commands;ComPtr<ID3D12Resource> vertices;uint64_t fence_value=0;};
 inline std::array<Slot,16> slots;
 inline uint32_t image_count=0,rtv_stride=0,index=0;
-inline bool acquired=false,waited=false,attempted=false;
+inline bool acquired=false,waited=false,submission_needs_fence=false;
 inline std::atomic<bool> failed=false,attached=false;
 inline uint64_t serial=0;
 struct Transition {float opacity=0;bool loading=false;std::array<float,3> color{};std::array<float,4> bounds{{0,0,1,1}};};
@@ -70,7 +63,10 @@ inline float ui_distance() {
     char text[128]{};host->vr->get_mod_value("UI_Distance",text,128);const float v=static_cast<float>(std::strtod(text,nullptr));
     return std::isfinite(v)&&v>0?v:0;
 }
-inline void fail(const char* why){failed=true;state=why;requested=false;host->functions->log_error("[Cinematic Mask] %s",why);}
+inline void fail(const char* why){
+    state=why;requested=false;
+    if(!failed.exchange(true)&&host->functions->log_error)host->functions->log_error("[Cinematic Mask] %s",why);
+}
 inline void create_pipeline(DXGI_FORMAT format) {
     D3D12_ROOT_PARAMETER parameter{};parameter.ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;parameter.ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
     D3D12_ROOT_SIGNATURE_DESC rd{};rd.NumParameters=1;rd.pParameters=&parameter;
@@ -94,26 +90,26 @@ inline void create_pipeline(DXGI_FORMAT format) {
 }
 inline bool initialize_images(Handle s) {
     session=s;
-    device=static_cast<ID3D12Device*>(host->renderer->device);
-    queue=static_cast<ID3D12CommandQueue*>(host->renderer->command_queue);
-    if(!device||!queue||queue->GetDesc().Type!=D3D12_COMMAND_LIST_TYPE_DIRECT)return false;
-    ComPtr<ID3D12Device> actual;check(queue->GetDevice(IID_PPV_ARGS(&actual)));if(actual.Get()!=device.Get())return false;
     std::array<int64_t,64> supported{};uint32_t n=0;
-    if(formats(s,0,&n,nullptr)!=0||!n||n>supported.size()||formats(s,n,&n,supported.data())!=0)return false;
+    if(xr.formats(s,0,&n,nullptr)!=0||!n||n>supported.size()||xr.formats(s,n,&n,supported.data())!=0||
+       !n||n>supported.size())return false;
     DXGI_FORMAT fmt=DXGI_FORMAT_UNKNOWN;
     for(auto candidate:{DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_B8G8R8A8_UNORM})
         if(std::find(supported.begin(),supported.begin()+n,static_cast<int64_t>(candidate))!=supported.begin()+n){fmt=candidate;break;}
     if(fmt==DXGI_FORMAT_UNKNOWN)return false;
-    const Create c{9,nullptr,0,1|32,fmt,1,pixels,pixels,1,2,1};
-    if(create_chain(s,&c,&chain)!=0||!chain||enumerate_images(chain,0,&image_count,nullptr)!=0||!image_count||image_count>slots.size())return false;
-    std::array<Image,16> images{};for(auto& image:images)image.type=1000028001;
-    if(enumerate_images(chain,image_count,&image_count,images.data())!=0)return false;
+    const openxr_handoff::SwapchainCreateInfo c{9,nullptr,0,1|32,fmt,1,pixels,pixels,1,2,1};
+    if(xr.create(s,&c,&chain)!=0||!chain||xr.enumerate(chain,0,&image_count,nullptr)!=0||
+       !image_count||image_count>slots.size())return false;
+    std::array<openxr_handoff::Image,16> images{};
+    for(auto& image:images)image.type=openxr_handoff::image_d3d12;
+    const auto capacity=image_count;
+    if(xr.enumerate(chain,capacity,&image_count,images.data())!=0||!image_count||image_count>capacity)return false;
     D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=image_count*2;
     check(device->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&rtvs)));rtv_stride=device->GetDescriptorHandleIncrementSize(hd.Type);
     check(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)));
     create_pipeline(fmt);
     for(unsigned i=0;i<image_count;++i) {
-        auto& slot=slots[i];slot.resource=images[i].resource;if(!slot.resource)return false;
+        auto& slot=slots[i];slot.resource=images[i].texture;if(!slot.resource)return false;
         const auto desc=slot.resource->GetDesc();
         if(desc.Width!=pixels||desc.Height!=pixels||desc.DepthOrArraySize!=2||desc.SampleDesc.Count!=1)return false;
         check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&slot.allocator)));
@@ -123,15 +119,31 @@ inline bool initialize_images(Handle s) {
     }
     state="ready";return true;
 }
+inline Result wait_for_image(){
+    const Wait w{{56,nullptr},0};
+    const auto result=xr.wait(chain,&w.header);
+    waited=result==0;
+    return result;
+}
+inline bool release_image(){
+    const acquired_images::ReleaseInfo info{57,nullptr};
+    if(xr.release(chain,&info)!=0){fail("release_failed");return false;}
+    acquired=waited=false;
+    return true;
+}
 inline bool draw(const std::array<Aperture,2>& holes,const std::array<std::array<Clip,6>,2>* vertices=nullptr,bool=false) {
-    if(!acquired){const Base a{55,nullptr};if(acquire(chain,&a,&index)!=0||index>=image_count){fail("acquire_failed");return false;}acquired=true;}
-    const Wait w{56,nullptr,0};const auto wr=wait_image(chain,&w);
+    if(!acquired){
+        const openxr_handoff::Base a{55,nullptr};
+        if(xr.acquire(chain,&a,&index)!=0){fail("acquire_failed");return false;}
+        acquired=true;
+    }
+    const auto wr=wait_for_image();
     if(wr==1){state="waiting_mask_image";return false;}
     if(wr!=0){fail("wait_failed");return false;}
-    waited=true;
-    const Base r{57,nullptr};auto& slot=slots[index];
+    if(index>=image_count){fail("invalid_mask_image");return false;}
+    auto& slot=slots[index];
     if(fence->GetCompletedValue()==UINT64_MAX){fail("device_removed");return false;}
-    if(fence->GetCompletedValue()<slot.fence_value){if(release(chain,&r)!=0)fail("busy_release_failed");acquired=waited=false;state="gpu_busy_skipped";return false;}
+    if(fence->GetCompletedValue()<slot.fence_value){if(release_image())state="gpu_busy_skipped";return false;}
     if(vertices) {
         if(!slot.vertices){D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_UPLOAD;D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=512;desc.Height=1;desc.DepthOrArraySize=1;desc.MipLevels=1;desc.SampleDesc.Count=1;desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
             check(device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&slot.vertices)));}
@@ -150,9 +162,9 @@ inline bool draw(const std::array<Aperture,2>& holes,const std::array<std::array
     } // Resolve timestamps before Close.
     check(slot.commands->Close());ID3D12CommandList* list=slot.commands.Get();static_cast<void>(0);queue->ExecuteCommandLists(1,&list);
     const auto signal=queue->Signal(fence.Get(),++serial);
-    static_cast<void>(0);
+    submission_needs_fence=FAILED(signal);
     check(signal);slot.fence_value=serial;
-    const auto result=release(chain,&r);acquired=waited=false;if(result!=0){fail("release_failed");return false;}return true;
+    return release_image();
 }
 inline Result transition_frame(Handle s,const xr_read::EndInfo* info,const xr_read::Projection* source_override=nullptr){
     const xr_read::Projection* source=source_override;unsigned source_index=0;
@@ -185,7 +197,8 @@ inline Result transition_frame(Handle s,const xr_read::EndInfo* info,const xr_re
             parameters[eye][5].w=(0.5f-(transition.bounds[1]+transition.bounds[3])*0.5f)*height;}
     }
     try{if(!chain&&!initialize_images(s)){fail("transition_initialization_failed");return original_end(s,info);}if(!draw(holes,&parameters,true))return original_end(s,info);}catch(...){fail("transition_gpu_failed");return original_end(s,info);}
-    std::array<xr_read::ProjectionView,2> views{mask_view(source->views[0],chain,0,pixels),mask_view(source->views[1],chain,1,pixels)};
+    const auto swapchain=reinterpret_cast<Handle>(chain);
+    std::array<xr_read::ProjectionView,2> views{mask_view(source->views[0],swapchain,0,pixels),mask_view(source->views[1],swapchain,1,pixels)};
     const xr_read::Projection cover{35,nullptr,2,source->space,2,views.data()};std::array<const xr_read::Layer*,16> layers{};unsigned count=0;
     for(unsigned i=0;i<info->layerCount;++i){layers[count++]=info->layers[i];if(transition.loading&&i==source_index)layers[count++]=reinterpret_cast<const xr_read::Layer*>(&cover);}
     // Loading hides the scene below its UI. Fade extension lies outside the
@@ -248,19 +261,22 @@ inline Result full_view_frame(Handle s,const xr_read::EndInfo* info){
     auto output=*info;output.layerCount=count;output.layers=layers.data();static_cast<void>(0);state="hangar_full_view_movie";
     return transition.opacity>0?transition_frame(s,&output,source):original_end(s,&output);
 }
-inline Result __stdcall end_frame(Handle s,const xr_read::EndInfo* info) {
+inline Result end_frame(Handle s,const xr_read::EndInfo* info,const openxr_handoff::Binding& binding,
+                        const openxr_handoff::PresentationApi& dispatch) {
     std::lock_guard<std::recursive_mutex> guard(lock);static_cast<void>(0);
+    xr=dispatch;original_end=xr.end_frame;
     const auto baseTransition=transition;
     struct RestoreTransition{Transition value;~RestoreTransition(){transition=value;}}restoreTransition{baseTransition};
     float authoredOpacity=0;
     if(native_fade::opacity(authoredOpacity)){transition.opacity=authoredOpacity;if(authoredOpacity<.9999f)transition.loading=false;}
     // A nonblocking wait can straddle the user switching OFF. Settle only our image.
-    if(acquired && ((!requested&&transition.opacity<=0)||failed) && s==session) {
-        if(!waited){const Wait w{56,nullptr,0};waited=wait_image(chain,&w)==0;}
-        if(waited){const Base r{57,nullptr};if(release(chain,&r)!=0)fail("off_release_failed");acquired=waited=false;}
+    const bool active=requested||full_view||expanded_view||transition.opacity>0;
+    if(session&&(session!=s||device.Get()!=binding.device.Get()||queue.Get()!=binding.queue.Get())){
+        state="session_changed_skipped";return original_end(s,info);
     }
-    if((!requested&&!full_view&&!expanded_view&&transition.opacity<=0)||failed||!info||info->type!=12||!info->layers||!info->layerCount||info->layerCount>13)return original_end(s,info);
-    if(host->openxr->get_xr_session()!=s||(session&&session!=s)){state="session_changed_skipped";static_cast<void>(0);return original_end(s,info);}
+    if(acquired&&(!active||failed)&&(waited||wait_for_image()==0))release_image();
+    if(!active||failed||!info||info->type!=12||!info->layers||!info->layerCount||info->layerCount>13)return original_end(s,info);
+    if(!session){session=s;device=binding.device;queue=binding.queue;}
     if(transition.opacity>0&&transition.loading)return transition_frame(s,info);
     if(expanded_view){
         expanded_reference(info);
@@ -317,7 +333,8 @@ inline Result __stdcall end_frame(Handle s,const xr_read::EndInfo* info) {
     bool ready=false;
     try{if(!chain&&!initialize_images(s)){fail("mask_initialization_failed");}if(!failed)ready=draw(holes,&vertices);}catch(...){fail("mask_gpu_failed");}
     if(!ready){static_cast<void>(0);return original_end(s,info);}
-    std::array<xr_read::ProjectionView,2> views{mask_view(source->views[0],chain,0,pixels),mask_view(source->views[1],chain,1,pixels)};
+    const auto swapchain=reinterpret_cast<Handle>(chain);
+    std::array<xr_read::ProjectionView,2> views{mask_view(source->views[0],swapchain,0,pixels),mask_view(source->views[1],swapchain,1,pixels)};
     const xr_read::Projection border{35,nullptr,2,source->space,2,views.data()};
     std::array<const xr_read::Layer*,16> layers{};unsigned layer_count=0;
     std::array<xr_read::Quad,16> pinned_ui{};unsigned pinned_count=0;
@@ -336,33 +353,43 @@ inline Result __stdcall end_frame(Handle s,const xr_read::EndInfo* info) {
     const auto result=original_end(s,&output);
     if(result<0)fail("masked_submission_failed");else{static_cast<void>(0);state="mask_active";}return result;
 }
-// SHA-pinned loader internals, independently below the existing HUD wrapper hook.
-// Disassembly: wrapper352A8F reads LoaderInstance+48, then dispatch+118 (xrEndFrame).
-inline void* lower_end(unsigned char* base) {
-    __try {void* loader=nullptr;using Lookup=Result(__fastcall*)(void**,const char*);
-        if(reinterpret_cast<Lookup>(base+0x35af80)(&loader,"xrEndFrame")!=0||!loader)return nullptr;
-        auto* table=*reinterpret_cast<unsigned char**>(static_cast<unsigned char*>(loader)+0x48);
-        return table?*reinterpret_cast<void**>(table+0x118):nullptr;
-    }__except(EXCEPTION_EXECUTE_HANDLER){return nullptr;}
+inline bool before_session_destroy(Handle s){
+    std::lock_guard<std::recursive_mutex> guard(lock);
+    if(s!=session||!serial||!fence)return true;
+    if(fence->GetCompletedValue()>=serial)return true; // UINT64_MAX means device removed.
+    // A failed submission signal may not have published this fence value.
+    if(submission_needs_fence){
+        if(FAILED(queue->Signal(fence.Get(),serial)))return FAILED(device->GetDeviceRemovedReason());
+        submission_needs_fence=false;
+    }
+    const auto deadline=GetTickCount64()+2000;
+    while(fence->GetCompletedValue()<serial&&GetTickCount64()<deadline)Sleep(1);
+    return fence->GetCompletedValue()>=serial;
 }
-template<class T> inline bool get(xr_read::GetProcFn proc,Handle instance,const char* name,T& output){return proc(instance,name,reinterpret_cast<void**>(&output))==0&&output;}
-inline void attach() {
-    if(attempted||!host||!host->openxr||!host->openxr->get_xr_session||!host->openxr->get_xr_session()||!host->renderer||!host->renderer->device||!host->renderer->command_queue)return;
-    attempted=true;auto module=GetModuleHandleW(L"UEVRBackend.dll");wchar_t path[32768]{};std::string hash;
-    if(!module||!GetModuleFileNameW(module,path,32768)||!boundary::file_hash(path,hash)||hash!=boundary::expected_hash){state="unsupported_backend";return;}
-    auto* base=reinterpret_cast<unsigned char*>(module);
-    const unsigned char lookup_bytes[]={0x48,0x89,0x5c,0x24,0x18,0x55,0x56,0x57,0x48,0x8d,0x6c,0x24,0xb9};
-    if(std::memcmp(base+0x35af80,lookup_bytes,sizeof(lookup_bytes))){state="loader_guard_failed";return;}
-    auto proc=reinterpret_cast<xr_read::GetProcFn>(base+0x34fa70);auto instance=host->openxr->get_xr_instance();
-    if(!get(proc,instance,"xrCreateSwapchain",create_chain)||!get(proc,instance,"xrEnumerateSwapchainImages",enumerate_images)||
-       !get(proc,instance,"xrAcquireSwapchainImage",acquire)||!get(proc,instance,"xrWaitSwapchainImage",wait_image)||
-       !get(proc,instance,"xrReleaseSwapchainImage",release)||!get(proc,instance,"xrEnumerateSwapchainFormats",formats)){state="resolver_failed";return;}
-    auto* target=lower_end(base);MEMORY_BASIC_INFORMATION memory{};
-    if(!target||!VirtualQuery(target,&memory,sizeof(memory))||!(memory.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))){state="dispatch_guard_failed";return;}
-    HMODULE own=nullptr;
-    if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,reinterpret_cast<LPCWSTR>(&end_frame),&own)){state="pin_failed";return;}
-    const auto id=host->functions->register_inline_hook(target,reinterpret_cast<void*>(&end_frame),reinterpret_cast<void**>(&original_end));
-    attached=id>=0&&original_end;state=attached?"attached":"hook_failed";static_cast<void>(0);
+inline void session_destroyed(Handle s){
+    std::lock_guard<std::recursive_mutex> guard(lock);
+    if(s==session){
+        slots={};rtvs.Reset();fence.Reset();pipeline.Reset();root.Reset();queue.Reset();device.Reset();
+        session=nullptr;chain=0;image_count=rtv_stride=index=0;serial=0;acquired=waited=submission_needs_fence=false;
+        anchored_window={};movie_reference={};anchored_distance=0;++activation;
+    }
+    attached=failed=false;state="waiting_session";
+}
+inline void register_presentation(const UEVR_PluginInitializeParam* api){
+    host=api;
+    openxr_handoff::shared_bridge().set_presentation({end_frame,before_session_destroy,session_destroyed});
+}
+inline void attach(){
+    if(!host||!host->openxr||!host->openxr->get_xr_session||!host->renderer||
+       host->renderer->renderer_type!=UEVR_RENDERER_D3D12||!host->renderer->device||!host->renderer->command_queue)return;
+    const auto s=host->openxr->get_xr_session();
+    if(!s)return;
+    auto& bridge=openxr_handoff::shared_bridge();
+    if(!bridge.attach(host,{}))return;
+    if(!bridge.presentation_ready(s))
+        bridge.adopt_existing_session(s,static_cast<ID3D12Device*>(host->renderer->device),
+                                      static_cast<ID3D12CommandQueue*>(host->renderer->command_queue));
+    attached=bridge.presentation_ready(s);
 }
 inline void control(const char* event,const char* data){
 if(event&&data&&!std::strcmp(event,"AC8_CinematicExpanded")){

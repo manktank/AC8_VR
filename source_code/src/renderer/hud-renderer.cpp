@@ -26,7 +26,7 @@ using Microsoft::WRL::ComPtr;
 const UEVR_PluginInitializeParam* api=nullptr;
 std::unique_ptr<hud_route_glow::Renderer> renderer;
 std::unique_ptr<hud_route_scene::Renderer> scene_renderer;
-openxr_handoff::Bridge bridge;
+auto& bridge=openxr_handoff::shared_bridge();
 ComPtr<ID3D12Resource> ui;
 ComPtr<ID3D12Fence> fence;
 ComPtr<ID3D12Device> device;

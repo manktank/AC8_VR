@@ -18,18 +18,18 @@ static bool cinematic_selected=false;
 static bool camera_available=false;
 static void tick_shared(UEVR_UGameEngineHandle,float){
     static ULONGLONG next_mask_check=0;
+    static bool mask_was_ready=false;
     if(cinema_mask::host && GetTickCount64()>=next_mask_check) {
         next_mask_check=GetTickCount64()+2000;
         cinema_mask::attach();
-        
-        if(cinematic_selected){
+        if(!cinematic_selected)return;
+        const bool ready=cinema_mask::attached&&!cinema_mask::failed;
         if(cinematic_projection::installed)api->functions->dispatch_lua_event("AC8_CinematicProjection_Ready","ready");
-        if(cinema_mask::attached && !cinema_mask::failed) {
+        if(ready){
             if(camera_available)api->functions->dispatch_lua_event("AC8_CinematicCamera_Ready","ready");
             api->functions->dispatch_lua_event("AC8_CinematicMask_Ready","ready");
-        }
-        }
-        if(cinema_mask::failed) api->functions->dispatch_lua_event("AC8_CinematicMask_Failed","failed");
+        }else if(mask_was_ready)api->functions->dispatch_lua_event("AC8_CinematicMask_Failed","failed");
+        mask_was_ready=ready;
     }
 }
 
@@ -41,7 +41,7 @@ extern "C" bool ac8_cinematic_selected_initialize(const UEVR_PluginInitializePar
     cinematic_selected=cinematic!=nullptr;
     bool ok=true;
     if(shared){
-        cinema_mask::host=shared;
+        cinema_mask::register_presentation(shared);
         ok=shared->sdk->callbacks->on_pre_engine_tick(tick_shared)&&ok;
         ok=shared->callbacks->on_custom_event(cinema_mask::control)&&ok;
     }

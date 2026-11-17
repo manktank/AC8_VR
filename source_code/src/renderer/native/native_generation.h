@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <string>
 #include <vector>
 #include <stdexcept>
 #include <cfloat>

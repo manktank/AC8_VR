@@ -543,7 +543,10 @@ local registered=pcall(function()
         end
         if name=='AC8_CinematicCamera_Ready' then S.nativeCameraReady=true end
         if name=='AC8_CinematicMask_Ready' and not S.nativeMaskReady then S.nativeMaskReady=true; end
-        if name=='AC8_CinematicMask_Failed' then S.nativeMaskReady=false;exit('native-mask-failed') end
+        if name=='AC8_CinematicMask_Failed' then
+            S.nativeMaskReady=false;S.nativeCameraReady=false
+            hangar(false);exit('native-mask-failed')
+        end
     end)
 end)
 S.nativeCallbackRegistered=registered

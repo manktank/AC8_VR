@@ -26,14 +26,17 @@ inline Outcome resolve(portable_layer::GetProc get,portable_layer::Instance inst
   if(get(instance,commands[i],&candidate[i])!=0||!candidate[i])return Outcome::incomplete;
  result=candidate;return Outcome::ready;
 }
-inline Outcome from_negotiation(Negotiate negotiate,const char* layer,portable_layer::Instance instance,Table& result){
+inline Outcome from_negotiation(Negotiate negotiate,const char* layer,portable_layer::Instance instance,Table& result,
+                                portable_layer::GetProc* selected=nullptr){
  result={};if(!negotiate)return Outcome::absent;
  const portable_layer::LoaderInfo loader{1,1,sizeof(portable_layer::LoaderInfo),1,1,portable_layer::api_version,portable_layer::api_version};
  portable_layer::Request request{2,1,sizeof(portable_layer::Request),0,0,nullptr,nullptr};
  if(negotiate(&loader,layer,&request)!=0||request.interface_version!=1||!request.get_proc)return Outcome::absent;
- return resolve(request.get_proc,instance,result);
+ const auto outcome=resolve(request.get_proc,instance,result);
+ if(outcome==Outcome::ready&&selected)*selected=request.get_proc;
+ return outcome;
 }
-inline Outcome find(portable_layer::Instance instance,Table& result){
+inline Outcome find(portable_layer::Instance instance,Table& result,portable_layer::GetProc* selected=nullptr){
  result={};
  // Public OFXR package/module and layer identities, shared by release builds.
  // GetModuleHandle never loads or enables OFXR for someone who did not use it.
@@ -42,7 +45,7 @@ inline Outcome find(portable_layer::Instance instance,Table& result){
  for(const auto* name:modules){
   const auto module=GetModuleHandleW(name);if(!module)continue;
   const auto negotiate=reinterpret_cast<Negotiate>(GetProcAddress(module,"xrNegotiateLoaderApiLayerInterface"));
-  for(const auto* layer:layers){const auto status=from_negotiation(negotiate,layer,instance,result);if(status!=Outcome::absent)return status;}
+  for(const auto* layer:layers){const auto status=from_negotiation(negotiate,layer,instance,result,selected);if(status!=Outcome::absent)return status;}
  }
  return Outcome::absent;
 }

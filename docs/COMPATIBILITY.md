@@ -10,6 +10,10 @@ When active OFXR recognizes the current instance, the glow adapter obtains its c
 
 Ordinary OpenXR with OFXR disabled completed the latest in-game test. OFXR v681 froze during mission entry on the tested VDXR setup with both TSR and DLSS. OFXR troubleshooting is deferred for this build.
 
+## Cinematic, hangar and loading presentation
+
+The black loading cover and cinematic/hangar framing use the same public OpenXR bridge as glow. They no longer require an exact UEVR backend hash. The cover can run with HUD Glow removed, and cinematic camera control uses the UEVR stereo callbacks. Use OpenXR, DirectX 12 and Native Stereo. Authored projection still requires a verified live game stereo interface.
+
 ## Remaining native boundaries
 
 Other game-specific and camera/projection hooks still validate the supported game/backend signatures, PE metadata and reflected layouts. UEVR API-version compatibility alone is not sufficient for those hooks. Unsupported evidence leaves the affected enhancement inactive; retain the checks.

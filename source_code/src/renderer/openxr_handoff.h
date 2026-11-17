@@ -28,9 +28,7 @@
 #include <vector>
 #include <string_view>
 #include "../../vendor/uevr/backend-api.h"
-#include "../backend/backend_boundary.h"
 #include "../backend/xr_subset.h"
-#include "xr_dispatch_guards.h"
 #include "acquired_images.h"
 #include "portable-layer-api.h"
 #include "ofxr_dispatch.h"
@@ -59,6 +57,22 @@ struct Callbacks {
     FrameOutcome (*frame_sink)(Session,const xr_read::EndInfo*,const Held*,size_t,uint64_t,
                                ID3D12Device*,ID3D12CommandQueue*,void*)=nullptr;
     void* context=nullptr;
+};
+// The presentation mask owns these swapchains. Use the selected provider's
+// trampolines so they never enter the bookkeeper for game swapchains.
+struct PresentationApi {
+    Result (__stdcall* create)(Session,const SwapchainCreateInfo*,Swapchain*)=nullptr;
+    Result (__stdcall* enumerate)(Swapchain,uint32_t,uint32_t*,Image*)=nullptr;
+    Result (__stdcall* acquire)(Swapchain,const Base*,uint32_t*)=nullptr;
+    Result (__stdcall* wait)(Swapchain,const Base*)=nullptr;
+    Result (__stdcall* release)(Swapchain,const acquired_images::ReleaseInfo*)=nullptr;
+    Result (__stdcall* formats)(Session,uint32_t,uint32_t*,int64_t*)=nullptr;
+    xr_read::EndFn end_frame=nullptr;
+};
+struct PresentationCallbacks {
+    Result (*submit)(Session,const xr_read::EndInfo*,const Binding&,const PresentationApi&)=nullptr;
+    bool (*before_destroy)(Session)=nullptr;
+    void (*destroyed)(Session)=nullptr;
 };
 struct HookApi {int (*install)(void*,void*,void**,void*)=nullptr;void* context=nullptr;};
 static_assert(sizeof(SessionCreateInfo)==32&&sizeof(GraphicsBinding)==32&&
@@ -98,7 +112,8 @@ class Bridge {
     std::recursive_mutex transaction_;
     acquired_images::Bookkeeper images_{release_info_type};
     std::array<Chain,16> chains_{};
-    Binding binding_{};Callbacks callbacks_{};Status status_{};
+    Binding binding_{};Callbacks callbacks_{};PresentationCallbacks presentation_{};Status status_{};
+    decltype(PresentationApi::formats) formats_=nullptr;
     uint64_t frame_=0;uint32_t observed_sessions_=0;
     bool frame_open_=false,disabled_=false,committing_=false,fatal_frame_=false;
     bool session_suspended_=false;
@@ -108,7 +123,7 @@ class Bridge {
     Observation observation_{}; // Guarded by observation_lock_.
     static_assert(std::tuple_size<decltype(chains_)>::value*2==
                   std::tuple_size<decltype(Observation::candidates)>::value,"one waited and one held per chain");
-    HookApi hooks_{};unsigned char* backend_=nullptr;
+    HookApi hooks_{};
     std::array<void*,12> dispatch_{};
     CreateSessionFn create_session_=nullptr;CreateSwapchainFn create_swapchain_=nullptr;
     DestroySwapchainFn destroy_swapchain_=nullptr;EnumFn enumerate_=nullptr;
@@ -119,14 +134,6 @@ class Bridge {
     static int install_from_api(void* target,void* detour,void** original,void* context){
         const auto* api=static_cast<const UEVR_PluginInitializeParam*>(context);
         return api->functions->register_inline_hook(target,detour,original);
-    }
-    static bool guarded_image(unsigned char* base){
-        if(!boundary::image_matches(base))return false;
-        __try{
-            for(const auto& entry:xr_dispatch_guards::entries)
-                if(std::memcmp(base+entry.rva,entry.bytes,sizeof(entry.bytes)))return false;
-            return true;
-        }__except(EXCEPTION_EXECUTE_HANDLER){return false;}
     }
     template<typename Fn> bool install(size_t entry,void* detour,Fn& original){
         static_assert(sizeof(Fn)==sizeof(void*),"unsupported function pointer ABI");
@@ -271,6 +278,10 @@ class Bridge {
         __try{return info&&info->type==xr_read::frame_end_info&&!info->next;}
         __except(EXCEPTION_EXECUTE_HANDLER){return false;}
     }
+    bool can_present(Session s) const{
+        return ready_&&presentation_.submit&&formats_&&observed_sessions_==1&&
+               binding_&&binding_.session==s&&!session_suspended_;
+    }
 public:
     Bridge()=default;Bridge(const Bridge&)=delete;Bridge& operator=(const Bridge&)=delete;
     Status status(){std::lock_guard<std::recursive_mutex> guard(transaction_);
@@ -278,6 +289,12 @@ public:
         d.disabled=disabled_;d.suspended=session_suspended_;
         return d;}
     ~Bridge(){if(active_.load()==this)std::terminate();}
+    void set_presentation(PresentationCallbacks callbacks){
+        std::lock_guard<std::recursive_mutex> guard(transaction_);presentation_=callbacks;
+    }
+    bool presentation_ready(Session s){
+        std::lock_guard<std::recursive_mutex> guard(transaction_);return can_present(s);
+    }
     // UEVR initializes plugins after creating its XR session, but before its
     // swapchains. Its public renderer data and XR graphics binding both use
     // the same D3D12 hook device/queue getters (saved PluginLoader.cpp and
@@ -294,12 +311,12 @@ public:
     bool attach(const UEVR_PluginInitializeParam* api,Callbacks callbacks,HookApi injection={}){
         Transaction lock(*this);
         if(!api||!api->functions||!api->functions->register_inline_hook)return false;
+        if(callbacks.frame_sink)callbacks_=callbacks;
         if(ready_)return true;
         if(disabled_)return false; // Never retry a partially installed hook set.
         
         status_.route="portable_openxr";status_.attach_state="resolving_public_dispatch";
         status_.lookup_name="none";status_.lookup_result=0;
-        HMODULE module=nullptr;
         const auto instance=api->openxr&&api->openxr->get_xr_instance?reinterpret_cast<Instance>(api->openxr->get_xr_instance()):nullptr;
         if(!instance){status_.attach_state="waiting_for_xr_instance";return false;}
         // UEVR can statically link a different loader from openxr_loader.dll.
@@ -308,18 +325,19 @@ public:
         const auto layer_proc=layer?reinterpret_cast<portable_layer::Resolve>(GetProcAddress(layer,"ac8_openxr_layer_resolve")):nullptr;
         bool resolved=false;
         ofxr_dispatch::Table application{};
-        const auto ofxr=ofxr_dispatch::find(instance,application);
+        portable_layer::GetProc get_proc=nullptr;
+        const auto ofxr=ofxr_dispatch::find(instance,application,&get_proc);
         if(ofxr==ofxr_dispatch::Outcome::incomplete){status_.attach_state="ofxr_application_dispatch_incomplete";return false;}
         if(ofxr==ofxr_dispatch::Outcome::ready){
             for(size_t i=0;i<dispatch_.size();++i)dispatch_[i]=reinterpret_cast<void*>(application[i]);
             status_.provider="ofxr_negotiated_api_layer";resolved=true;
         }else{
-            const auto get_proc=layer_proc;
+            get_proc=layer_proc;
             if(!get_proc){status_.attach_state="negotiated_layer_unavailable";return false;}
             status_.provider="negotiated_api_layer";
             resolved=true;
             for(size_t i=0;i<dispatch_.size();++i){
-                const auto name=i<10?xr_dispatch_guards::entries[i].name:i==10?"xrBeginSession":"xrDestroySession";
+                const auto name=ofxr_dispatch::commands[i];
                 portable_layer::Function address=nullptr;
                 const auto result=get_proc(instance,name,&address);
                 if(result!=0||!address){
@@ -343,9 +361,16 @@ public:
         if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
               reinterpret_cast<LPCWSTR>(&pin_anchor),&own))return false;
         Bridge* empty=nullptr;if(!active_.compare_exchange_strong(empty,this))return false;
-        backend_=reinterpret_cast<unsigned char*>(module);callbacks_=callbacks;
+        if(presentation_.submit&&get_proc){
+            portable_layer::Function address=nullptr;
+            HMODULE owner=nullptr;
+            if(get_proc(instance,"xrEnumerateSwapchainFormats",&address)==0&&address&&
+               GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
+                                  reinterpret_cast<LPCWSTR>(address),&owner))
+                formats_=reinterpret_cast<decltype(formats_)>(address);
+        }
         hooks_=injection.install?injection:HookApi{install_from_api,const_cast<UEVR_PluginInitializeParam*>(api)};
-        // Order matches xr_dispatch_guards::entries; all wrappers are guarded.
+        // Order matches ofxr_dispatch::commands; all wrappers are guarded.
         const bool okay=
             install(0,reinterpret_cast<void*>(&on_acquire),acquire_)&&
             install(1,reinterpret_cast<void*>(&on_wait),wait_)&&
@@ -417,7 +442,7 @@ public:
         Bridge* b=active_;if(!b||!b->create_swapchain_)return runtime_failure;
         Transaction lock(*b);
         const Result result=b->create_swapchain_(s,info,output);
-        if(result!=0||!b->effect(s))return result;
+        if(result!=0||!b->callbacks_.frame_sink||!b->effect(s))return result;
         Swapchain created=0;
         if(read_swapchain(info,output,&created)){
             if(b->chain(created)||!b->vacant()){b->disable_effect();return result;}
@@ -529,8 +554,11 @@ public:
         Bridge* b=active_;if(!b||!b->destroy_session_)return runtime_failure;
         Transaction lock(*b);
         if(b->committing_||!b->flush_all())return runtime_failure;
+        if(s==b->binding_.session&&b->presentation_.before_destroy&&!b->presentation_.before_destroy(s))
+            return runtime_failure;
         const Result result=b->destroy_session_(s);
         if(result==0&&s==b->binding_.session){
+            if(b->presentation_.destroyed)b->presentation_.destroyed(s);
             for(auto& c:b->chains_)c={};b->binding_={};b->images_.destroyed_session();
             b->observed_sessions_=0;b->frame_open_=b->session_suspended_=b->fatal_frame_=false;
             b->disabled_=false;
@@ -589,8 +617,23 @@ public:
             b->fatal_frame_=true;b->committing_=false;b->disable_effect();
             return runtime_failure;
         }
+        if(b->can_present(s)&&simple_end(info)){
+            const PresentationApi api{b->create_swapchain_,b->enumerate_,b->acquire_,b->wait_,
+                                      b->release_,b->formats_,b->end_frame_};
+            try{
+                const auto result=b->presentation_.submit(s,info,b->binding_,api);
+                b->committing_=false;return result;
+            }catch(...){
+                b->committing_=false;return runtime_failure;
+            }
+        }
         b->committing_=false;
         return b->end_frame_(s,info);
     }
 };
+inline Bridge& shared_bridge(){
+    // Hooks pin the payload. Keep the bridge resident even during DLL teardown.
+    static Bridge* bridge=new Bridge;
+    return *bridge;
+}
 } // namespace openxr_handoff
