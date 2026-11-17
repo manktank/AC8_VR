@@ -639,12 +639,12 @@ local sourceHUD,sourceRoot,sourceHUDName,sourceRootName
 local sourceGeneration=0
 local sourceReplyTicks=4
 local function refreshSourceOwner()
-    local hud=call(call(api,'get_player_controller',0),'GetHUD')
-    local hudName=full(hud)
-    if not hudName then hud=nil end
-    local root=call(hud,'get_property','HudWidget')
-    local rootName=full(root)
-    if not rootName then root=nil end
+    -- Glow lifecycle has already read Core's shared HUD snapshot for this tick.
+    local context=R.context
+    local hud,root=context.hud,context.root
+    local hudName,rootName=context.hudName,context.rootName
+    if not hudName or hudName==''then hud,hudName=nil,nil end
+    if not rootName or rootName==''then root,rootName=nil,nil end
     if hud~=sourceHUD or root~=sourceRoot or hudName~=sourceHUDName or rootName~=sourceRootName then
         sourceHUD,sourceRoot,sourceHUDName,sourceRootName=hud,root,hudName,rootName
         sourceGeneration=sourceGeneration+1
@@ -652,7 +652,6 @@ local function refreshSourceOwner()
         S.root=nil;S.rootName=nil;S.roots={};S.candidates={}
         S.nativeRootPaths={};S.nativeRootsUntil=nil;S.nextScan=0
         resetRectangleCache()
-        if frameReads then frameReads={};frameBounds={};frameChains={}end
     end
 end
 local function sendSourceRequest(event)
@@ -892,17 +891,15 @@ end
 
 local function update(delta)
     if S.stopped then return end
-    frameReads={};frameBounds={};frameChains={}
     refreshSourceOwner()
     if AC8Runtime.glowGameplayAllowed==false then
         if not S.gameplaySuspended then
-            S.gameplaySuspended=true;resetRectangleCache()
+            publishPolicy({});S.gameplaySuspended=true;resetRectangleCache()
         end
-        publishPolicy({})
-        frameReads=nil;frameBounds=nil;frameChains=nil;frameRootStamp=nil
         return
     end
     if S.gameplaySuspended then S.gameplaySuspended=false;S.nextScan=0;resetRectangleCache() end
+    frameReads={};frameBounds={};frameChains={}
     S.elapsed=S.elapsed+math.max(0,math.min(tonumber(delta) or 0.016,1))
     if S.elapsed>=S.nextScan and discover()~='pending'then S.nextScan=S.elapsed+0.5 end
     local rectangles=buildPolicy()
@@ -914,7 +911,7 @@ uevr.sdk.callbacks.on_lua_event(function(name,data)
     if S.stopped or type(data)~='string'then return end
     if name=='AC8_GlowDiscoverySources'then
         if #data>1048576 then return end
-        refreshSourceOwner()
+        -- Buffer the reply. The post-engine tick refreshes ownership before it can be used.
         local pending=sourcePending
         if not pending or pending.hud~=sourceHUD or pending.root~=sourceRoot or pending.generation~=sourceGeneration then return end
         local request,status,tail=data:match('^(%d+)|(%a+)(.*)$')

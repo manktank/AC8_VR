@@ -57,6 +57,5 @@ data/AC8_VR-*Cache*.json
 data/AC8_VR-HUDPresentationSetup.json
 data/AC8_VR-Ladder.json
 data/AC8_VR-GlowAudit.json
-data/AC8_VR-TraceCallbacks.flag
 !data/AC8_VR-*Controls.json
 !data/AC8_VR-TargetSettings.json
