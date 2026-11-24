@@ -31,6 +31,8 @@ inline std::atomic<const char*> state="waiting_session";
 
 inline std::atomic<uint64_t> activation=0;
 inline uint64_t anchored_activation=0;
+inline uint64_t hangar_ui_warning_activation=~uint64_t{0};
+inline uint64_t cinematic_ui_warning_activation=~uint64_t{0};
 inline Window anchored_window{};
 inline std::array<xr_read::ProjectionView,2> movie_reference{};
 inline float anchored_distance=0;
@@ -337,7 +339,7 @@ inline Result end_frame(Handle s,const xr_read::EndInfo* info,const openxr_hando
     std::array<xr_read::ProjectionView,2> views{mask_view(source->views[0],swapchain,0,pixels),mask_view(source->views[1],swapchain,1,pixels)};
     const xr_read::Projection border{35,nullptr,2,source->space,2,views.data()};
     std::array<const xr_read::Layer*,16> layers{};unsigned layer_count=0;
-    std::array<xr_read::Quad,16> pinned_ui{};unsigned pinned_count=0;
+    std::array<xr_read::Quad,16> pinned_ui{};unsigned pinned_count=0,separated_count=0;bool cinematic_ui_invalid=false;
     const unsigned ui_width=host->vr&&host->vr->get_ui_width?host->vr->get_ui_width():0;
     const unsigned ui_height=host->vr&&host->vr->get_ui_height?host->vr->get_ui_height():0;
     for(unsigned i=0;i<info->layerCount;++i){
@@ -346,10 +348,34 @@ inline Result end_frame(Handle s,const xr_read::EndInfo* info,const openxr_hando
             layers[layer_count++]=reinterpret_cast<const xr_read::Layer*>(&movies[1]);
             if(hangar_crop)layers[layer_count++]=reinterpret_cast<const xr_read::Layer*>(&border);
         }else if(!hangar_crop&&anchor_ui_quad(info->layers[i],anchored_window,ui_width,ui_height,pinned_ui[pinned_count])){
+            // Pinned UI shares the movie plane exactly; separate it like the hangar menu.
+            xr_read::Quad separated{};
+            if(separate_ui_quad(reinterpret_cast<const xr_read::Layer*>(&pinned_ui[pinned_count]),source->views,separated)){
+                pinned_ui[pinned_count]=separated;++separated_count;
+            }else cinematic_ui_invalid=true;
             layers[layer_count++]=reinterpret_cast<const xr_read::Layer*>(&pinned_ui[pinned_count++]);
         }else layers[layer_count++]=info->layers[i];}
     if(!hangar_crop)layers[layer_count++]=reinterpret_cast<const xr_read::Layer*>(&border);
+    const bool cinematic_edge_unavailable=pinned_count==1&&separated_count==1&&
+        !clip_movies_to_ui(pinned_ui[0],source->views,movies);
+    if((cinematic_ui_invalid||cinematic_edge_unavailable)&&cinematic_ui_warning_activation!=epoch){
+        cinematic_ui_warning_activation=epoch;
+        if(host->functions->log_error)host->functions->log_error(cinematic_ui_invalid?
+            "[Cinematic Mask] cinematic UI separation unavailable for current viewer geometry; original pinned UI retained":
+            "[Cinematic Mask] cinematic scene edge clipping unavailable for current geometry; UI separation retained");
+    }
     auto output=*info;output.layerCount=layer_count;output.layers=layers.data();
+    xr_read::Quad separated_hangar_ui{};
+    const auto hangar_separation=separate_hangar_ui(requested&&hangar_crop&&!full_view&&!expanded_view&&transition.opacity==0,
+        info,output,movies,ui_width,ui_height,separated_hangar_ui,layers);
+    if((hangar_separation==HangarUiSeparation::invalid_geometry||
+        hangar_separation==HangarUiSeparation::adjusted_edge_unavailable)&&hangar_ui_warning_activation!=epoch){
+        hangar_ui_warning_activation=epoch;
+        if(host->functions->log_error)host->functions->log_error(
+            hangar_separation==HangarUiSeparation::invalid_geometry?
+            "[Cinematic Mask] hangar UI separation unavailable for current viewer geometry; original UI retained":
+            "[Cinematic Mask] hangar scene edge clipping unavailable for current geometry; UI separation retained");
+    }
     const auto result=original_end(s,&output);
     if(result<0)fail("masked_submission_failed");else{static_cast<void>(0);state="mask_active";}return result;
 }

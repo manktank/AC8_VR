@@ -27,6 +27,17 @@ The FPM follows ladder movement/scale and retains native velocity motion. Separa
 
 ## First launch and runtime state
 
+With native cropped hangar presentation active, matching flat UI/movie planes
+are separated automatically to prevent menu flicker. The UI is presented
+20 mm closer, with angular-size compensation. The aircraft/3D background and
+border remain present; per-eye scene edges are fitted continuously inside the
+corrected UI footprint so the background cannot overhang the menu.
+Saved UEVR distance/size settings are not changed.
+This hangar correction is limited to validated layouts outside transitions.
+Cropped cutscene presentation applies the same separation to its pinned flat
+UI, including subtitles and 2D video shown through the UI layer. Curved UI,
+hangar full view, loading and expanded views retain their existing behavior.
+
 The editable `HUD_PRESENTATION` block in HUD Layout supplies initial distance 1m, size 1 and curvature 113.625 degrees. The generated `AC8_VR-HUDPresentationSetup.json` marker admits this once; later saved UEVR changes are respected. It must be absent from a fresh-install archive and retained for an existing user's profile.
 
 Other supplied `AC8_VR-*Controls.json` files contain feature settings. Changes made directly on disk generally require a script/game restart; prefer the exposed controls. Recovery journals and baseline/cache files are generated for functional restoration and should not be copied into fresh packages. Back up the profile before changing files.
